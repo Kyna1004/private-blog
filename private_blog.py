@@ -7,8 +7,6 @@ Original file is located at
     https://colab.research.google.com/drive/13yD9_fkj88BEsVUXcTWMxUw4g5eOK3Di
 """
 
-!pip install streamlit pandas Pillow
-
 """
 HOW TO RUN THIS APP:
 1. Open your terminal or command prompt.
