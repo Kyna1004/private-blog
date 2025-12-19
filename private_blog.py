@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 kyna.london — Digital Garden
-Updated: Navigation First, Login Collapsed
+Updated: Fixed Flickering, Layout Stability & CSS Injection
 """
 
 import sys
@@ -14,7 +14,7 @@ from PIL import Image
 import io
 
 # =====================================================
-# Page Config
+# Page Config (Must be first)
 # =====================================================
 st.set_page_config(
     page_title="kyna.london",
@@ -24,30 +24,132 @@ st.set_page_config(
 )
 
 # =====================================================
-# Global CSS (Desktop + Mobile)
+# Database Functions
 # =====================================================
-def local_css():
+DB_FILE = "blog_data.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    # Users Table
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        password TEXT,
+        nickname TEXT,
+        avatar BLOB,
+        role TEXT,
+        is_active INTEGER
+    )""")
+
+    # Posts Table
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT,
+        title TEXT,
+        content TEXT,
+        image BLOB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # Comments Table
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id INTEGER,
+        username TEXT,
+        content TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+    
+    # Activity Logs Table
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS activity_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT,
+        action TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # Create Admin if not exists
+    c.execute("SELECT * FROM users WHERE username='admin'")
+    if not c.fetchone():
+        pwd = hashlib.sha256("admin123".encode()).hexdigest()
+        c.execute(
+            "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)",
+            ("admin", pwd, "Admin", None, "admin", 1)
+        )
+
+    conn.commit()
+    conn.close()
+
+# Initialize DB on load
+init_db()
+
+# =====================================================
+# Helpers
+# =====================================================
+def make_hash(pwd):
+    return hashlib.sha256(pwd.encode()).hexdigest()
+
+def save_image(upload):
+    return upload.getvalue() if upload else None
+
+def log_activity(username, action):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO activity_logs (username, action) VALUES (?, ?)", (username, action))
+    conn.commit()
+    conn.close()
+
+def init_session_state():
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+        st.session_state.role = "guest"
+        st.session_state.username = "Guest"
+
+# =====================================================
+# Global CSS & UI Components
+# =====================================================
+def inject_custom_css():
     st.markdown("""
     <style>
-    /* ========== Base ========== */
+    /* ========== Global Theme ========== */
     .stApp {
         background-color: #000000;
         color: #ffffff;
     }
+    
+    /* Fix Streamlit top padding to prevent content from jumping */
+    .block-container {
+        padding-top: 2rem !important;
+        padding-bottom: 2rem !important;
+    }
 
-    header, footer {
+    /* Hide standard elements */
+    header[data-testid="stHeader"] {
+        visibility: hidden;
+    }
+    footer {
         visibility: hidden;
     }
 
     h1, h2, h3, h4 {
         font-weight: 600;
-        color: #ffffff;
+        color: #ffffff !important;
     }
 
     /* ========== Sidebar ========== */
     [data-testid="stSidebar"] {
         background-color: #0f0f0f;
         border-right: 1px solid #222;
+    }
+    
+    /* Sidebar text fix */
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] label {
+        color: #ffffff;
     }
 
     /* ========== Inputs ========== */
@@ -56,16 +158,22 @@ def local_css():
         color: #ffffff !important;
         border: 1px solid #333 !important;
     }
+    
+    /* Radio Button Fix */
+    div[role="radiogroup"] label {
+        color: #ffffff !important;
+    }
 
     /* ========== Buttons ========== */
     .stButton button {
         background: #1a1a1a;
         color: #fff;
         border: 1px solid #333;
+        transition: all 0.2s;
     }
-    
     .stButton button:hover {
         border-color: #666;
+        background: #222;
         color: #fff;
     }
 
@@ -107,35 +215,28 @@ def local_css():
     }
 
     /* =================================================
-       Mobile Layout
+       Mobile Layout Tweaks
        ================================================= */
     @media (max-width: 768px) {
-        /* Hide sidebar */
+        /* Hide sidebar on mobile */
         [data-testid="stSidebar"] {
             display: none;
         }
 
+        /* Adjust padding for mobile navbar */
         .block-container {
-            padding: 80px 16px 32px 16px;
-            max-width: 100%;
+            padding-top: 80px !important;
+            padding-left: 16px !important;
+            padding-right: 16px !important;
         }
 
         .notion-card {
             padding: 16px;
         }
-
-        h2 {
-            font-size: 18px;
-        }
-
-        p {
-            font-size: 15px;
-            line-height: 1.6;
-        }
     }
 
     /* =================================================
-       Mobile Navbar
+       Mobile Navbar Components
        ================================================= */
     .mobile-header {
         display: none;
@@ -154,11 +255,13 @@ def local_css():
             justify-content: space-between;
             padding: 0 16px;
             z-index: 1000;
+            border-bottom: 1px solid #222;
         }
 
         .mobile-title {
             font-size: 16px;
             font-weight: 600;
+            color: #fff;
         }
     }
 
@@ -187,134 +290,31 @@ def local_css():
         color: white;
     }
     </style>
-    """, unsafe_allow_html=True)
-
-local_css()
-
-# =====================================================
-# Mobile Navbar
-# =====================================================
-def mobile_navbar():
-    st.markdown("""
+    
+    <!-- Mobile Navbar HTML injected here to reduce flicker -->
     <div class="mobile-header">
-        <label for="menu-toggle" style="font-size:24px;cursor:pointer;">☰</label>
+        <label for="menu-toggle" style="font-size:24px;cursor:pointer;color:#fff;">☰</label>
         <div class="mobile-title">kyna.london</div>
         <div style="width:24px;"></div>
     </div>
-
     <input type="checkbox" id="menu-toggle"/>
-
     <div class="mobile-menu">
-        <label for="menu-toggle" style="font-size:24px;cursor:pointer;">✕</label>
-        <a href="#Introduce">About</a>
-        <a href="#Blogs">Blogs</a>
-        <a href="#Writing">Writings</a>
-        <a href="#Gallery">Gallery</a>
-        <br/><br/>
-        <span style="color:#666; font-size:14px;">Use Sidebar on Desktop to Login</span>
+        <label for="menu-toggle" style="font-size:24px;cursor:pointer;color:#fff;">✕</label>
+        <a href="#" onclick="document.getElementById('menu-toggle').checked = false;">Close Menu</a>
+        <div style="margin-top:20px; font-size:14px; color:#666;">
+           (Use Desktop Sidebar for full navigation & login)
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
 # =====================================================
-# Database
-# =====================================================
-DB_FILE = "blog_data.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-
-    # Users Table
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY,
-        password TEXT,
-        nickname TEXT,
-        avatar BLOB,
-        role TEXT,
-        is_active INTEGER
-    )""")
-
-    # Posts Table
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS posts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        category TEXT,
-        title TEXT,
-        content TEXT,
-        image BLOB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-
-    # Comments Table
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS comments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        post_id INTEGER,
-        username TEXT,
-        content TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-    
-    # Activity Logs Table (NEW)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS activity_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        action TEXT,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-
-    # Create Admin if not exists
-    c.execute("SELECT * FROM users WHERE username='admin'")
-    if not c.fetchone():
-        pwd = hashlib.sha256("admin123".encode()).hexdigest()
-        # Admin role is explicitly 'admin'
-        c.execute(
-            "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)",
-            ("admin", pwd, "Admin", None, "admin", 1)
-        )
-
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# =====================================================
-# Helpers
-# =====================================================
-def make_hash(pwd):
-    return hashlib.sha256(pwd.encode()).hexdigest()
-
-def save_image(upload):
-    return upload.getvalue() if upload else None
-
-def log_activity(username, action):
-    """Log user activity to database"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO activity_logs (username, action) VALUES (?, ?)", (username, action))
-    conn.commit()
-    conn.close()
-
-def init_session_state():
-    """Ensure session state variables exist"""
-    if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
-        st.session_state.role = "guest"
-        st.session_state.username = "Guest"
-
-# =====================================================
-# User System (Login / Register) - MOVED TO BOTTOM
+# User System (Collapsed at bottom)
 # =====================================================
 def sidebar_user_system():
-    # If logged out, show Login/Register hidden in an expander
     if not st.session_state.logged_in:
-        # Use expander so it doesn't take up space by default
         with st.sidebar.expander("👤 Log in / Sign up", expanded=False):
             tab1, tab2 = st.tabs(["Login", "Register"])
             
-            # --- LOGIN TAB ---
             with tab1:
                 user = st.text_input("Username", key="login_user")
                 pwd = st.text_input("Password", type="password", key="login_pwd")
@@ -327,9 +327,9 @@ def sidebar_user_system():
                     conn.close()
                     
                     if data and make_hash(pwd) == data[0]:
-                        if data[2] == 1: # check active
+                        if data[2] == 1:
                             st.session_state.logged_in = True
-                            st.session_state.role = data[1] # admin or subscriber
+                            st.session_state.role = data[1]
                             st.session_state.username = user
                             log_activity(user, "Logged In")
                             st.success("Welcome!")
@@ -339,7 +339,6 @@ def sidebar_user_system():
                     else:
                         st.error("Invalid credentials.")
 
-            # --- REGISTER TAB ---
             with tab2:
                 new_user = st.text_input("New Username", key="reg_user")
                 new_pwd = st.text_input("New Password", type="password", key="reg_pwd")
@@ -347,14 +346,13 @@ def sidebar_user_system():
                 
                 if st.button("Sign Up", use_container_width=True):
                     if new_pwd != confirm_pwd:
-                        st.error("Passwords do not match.")
+                        st.error("Passwords mismatch.")
                     elif not new_user or not new_pwd:
                         st.error("Fill all fields.")
                     else:
                         conn = sqlite3.connect(DB_FILE)
                         c = conn.cursor()
                         try:
-                            # Default role is 'subscriber', is_active=0 (Requires Approval)
                             hashed_pwd = make_hash(new_pwd)
                             c.execute(
                                 "INSERT INTO users (username, password, role, is_active) VALUES (?, ?, ?, ?)", 
@@ -362,13 +360,12 @@ def sidebar_user_system():
                             )
                             conn.commit()
                             log_activity(new_user, "Registered")
-                            st.info("Account created! Wait for approval.")
+                            st.info("Created! Wait for approval.")
                         except sqlite3.IntegrityError:
                             st.error("User exists.")
                         finally:
                             conn.close()
 
-    # If logged in, show info clearly
     else:
         st.sidebar.markdown("---")
         st.sidebar.caption("Logged in as:")
@@ -382,13 +379,11 @@ def sidebar_user_system():
             st.rerun()
 
 # =====================================================
-# Pages
+# Content Renderers
 # =====================================================
 def render_feed(category):
     st.markdown(f"## {category}")
 
-    # --- PERMISSION 1: WRITING ---
-    # Only Admin can write/publish
     if st.session_state.get("role") == "admin":
         with st.expander("➕ Write New Post"):
             with st.form(f"new_{category}"):
@@ -404,30 +399,25 @@ def render_feed(category):
                     )
                     conn.commit()
                     conn.close()
-                    log_activity(st.session_state.username, f"Published Post: {title}")
+                    log_activity(st.session_state.username, f"Published: {title}")
                     st.rerun()
 
-    # --- Fetch Posts ---
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT id, title, content, created_at, image FROM posts WHERE category=? ORDER BY created_at DESC", (category,))
     posts = c.fetchall()
     conn.close()
 
-    # --- Render Posts ---
     for post_id, t, ctt, d, img in posts:
         st.markdown("<div class='notion-card'>", unsafe_allow_html=True)
-        
         st.subheader(t)
         st.caption(f"📅 {d}")
         if img:
             st.image(img, use_column_width=True)
         st.markdown(ctt)
         
-        # --- Comment Section ---
         st.markdown("<div class='comment-section'><h6>Comments</h6>", unsafe_allow_html=True)
         
-        # 1. Fetch Comments
         conn = sqlite3.connect(DB_FILE)
         cc = conn.cursor()
         cc.execute("SELECT username, content, created_at FROM comments WHERE post_id=? ORDER BY created_at ASC", (post_id,))
@@ -444,31 +434,24 @@ def render_feed(category):
                 {c_text}
             </div>
             """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("</div>", unsafe_allow_html=True) # End comment section div
-
-        # --- PERMISSION 2: COMMENTING ---
-        # Admin AND Subscriber can comment. Guest cannot.
         if st.session_state.logged_in and st.session_state.role in ['admin', 'subscriber']:
             with st.form(key=f"comment_form_{post_id}"):
                 new_comment = st.text_area("Add a comment...", height=60, label_visibility="collapsed")
                 c_submit = st.form_submit_button("Post Comment")
-                
                 if c_submit and new_comment:
                     conn = sqlite3.connect(DB_FILE)
                     cx = conn.cursor()
-                    cx.execute(
-                        "INSERT INTO comments (post_id, username, content) VALUES (?, ?, ?)",
-                        (post_id, st.session_state.username, new_comment)
-                    )
+                    cx.execute("INSERT INTO comments (post_id, username, content) VALUES (?, ?, ?)", (post_id, st.session_state.username, new_comment))
                     conn.commit()
                     conn.close()
-                    log_activity(st.session_state.username, f"Commented on post ID {post_id}")
+                    log_activity(st.session_state.username, f"Commented on {post_id}")
                     st.rerun()
         elif not st.session_state.logged_in:
-             st.markdown("<p style='font-size:12px;color:#444;margin-top:10px;'>Log in (Subscriber/Admin) to comment.</p>", unsafe_allow_html=True)
+             st.markdown("<p style='font-size:12px;color:#444;margin-top:10px;'>Log in to comment.</p>", unsafe_allow_html=True)
 
-        st.markdown("</div>", unsafe_allow_html=True) # End notion-card
+        st.markdown("</div>", unsafe_allow_html=True)
 
 def render_gallery():
     st.markdown("## Gallery")
@@ -485,7 +468,6 @@ def render_gallery():
                 st.image(img, use_column_width=True)
             st.caption(t)
     
-    # PERMISSION: Only Admin upload
     if st.session_state.get("role") == "admin":
         with st.expander("Add to Gallery"):
             with st.form("gallery_upload"):
@@ -495,10 +477,7 @@ def render_gallery():
                     if g_img:
                         conn = sqlite3.connect(DB_FILE)
                         c = conn.cursor()
-                        c.execute(
-                            "INSERT INTO posts (category, title, content, image) VALUES (?, ?, ?, ?)",
-                            ("Gallery", g_title, "", save_image(g_img))
-                        )
+                        c.execute("INSERT INTO posts (category, title, content, image) VALUES (?, ?, ?, ?)", ("Gallery", g_title, "", save_image(g_img)))
                         conn.commit()
                         conn.close()
                         log_activity(st.session_state.username, "Uploaded to Gallery")
@@ -506,16 +485,12 @@ def render_gallery():
 
 def render_admin_panel():
     st.markdown("## 🛡️ Admin Panel")
-    
-    # --- TAB SYSTEM FOR ADMIN ---
     tab1, tab2 = st.tabs(["User Approvals", "Activity Logs"])
     
-    # --- PERMISSION 3: MANAGE SUBSCRIBERS ---
     with tab1:
         st.subheader("Pending User Approvals")
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        # Fetch inactive users
         c.execute("SELECT username FROM users WHERE is_active=0")
         pending_users = c.fetchall()
         
@@ -526,17 +501,13 @@ def render_admin_panel():
             for user_tuple in pending_users:
                 username = user_tuple[0]
                 col1, col2, col3 = st.columns([2, 1, 1])
-                
-                with col1:
-                    st.markdown(f"**{username}**")
-                
+                with col1: st.markdown(f"**{username}**")
                 with col2:
                     if st.button("✅ Approve", key=f"approve_{username}"):
                         c.execute("UPDATE users SET is_active=1 WHERE username=?", (username,))
                         conn.commit()
                         log_activity(st.session_state.username, f"Approved user: {username}")
                         st.rerun()
-                
                 with col3:
                     if st.button("❌ Reject", key=f"reject_{username}"):
                         c.execute("DELETE FROM users WHERE username=?", (username,))
@@ -546,47 +517,42 @@ def render_admin_panel():
                 st.markdown("---")
         conn.close()
 
-    # --- PERMISSION 4: VIEW ALL BROWSING RECORDS ---
     with tab2:
         st.subheader("Global User Activity Logs")
         conn = sqlite3.connect(DB_FILE)
-        # Load logs into dataframe for nice display
         df_logs = pd.read_sql_query("SELECT timestamp, username, action FROM activity_logs ORDER BY timestamp DESC LIMIT 100", conn)
         conn.close()
-        
         st.dataframe(df_logs, use_container_width=True)
-
 
 # =====================================================
 # Main
 # =====================================================
 def main():
-    mobile_navbar()
+    # 1. Inject CSS FIRST to prevent flickering
+    inject_custom_css()
     
-    # 1. Initialize Session BEFORE anything else
+    # 2. Initialize Session
     init_session_state()
 
-    # 2. Navigation Menu (MOVED TO TOP)
+    # 3. Sidebar Navigation
     st.sidebar.title("kyna.london")
     
     menu_options = ["Introduce", "Blogs", "Writing", "Gallery"]
-    
-    # Only Admin sees Admin Panel
     if st.session_state.get("logged_in") and st.session_state.get("role") == "admin":
         menu_options.append("Admin Panel")
 
-    menu = st.sidebar.radio("Navigate", menu_options)
+    # Fixed key to prevent state loss
+    menu = st.sidebar.radio("Navigate", menu_options, key="main_navigation")
     
-    # 3. User Login System (MOVED TO BOTTOM)
-    st.sidebar.markdown("---")
+    # 4. User System (Bottom Sidebar)
     sidebar_user_system()
     
-    # --- LOG BROWSING HISTORY ---
+    # 5. Logging (Only log if page changed to prevent loops)
     if "last_page" not in st.session_state or st.session_state.last_page != menu:
         log_activity(st.session_state.get("username", "Guest"), f"Viewed Page: {menu}")
         st.session_state.last_page = menu
 
-    # Routing
+    # 6. Page Routing
     if menu == "Introduce":
         st.markdown("## About")
         st.markdown("A quiet place for writing, memory, and thinking.")
@@ -597,7 +563,6 @@ def main():
     elif menu == "Gallery":
         render_gallery()
     elif menu == "Admin Panel":
-        # Double check security
         if st.session_state.get("role") == "admin":
             render_admin_panel()
         else:
