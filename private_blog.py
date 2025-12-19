@@ -1,20 +1,26 @@
 # -*- coding: utf-8 -*-
 """
 kyna.london — Digital Garden
-Updated: Fixed Flickering, Layout Stability & CSS Injection
+Backend: Google Firestore (Cloud Database)
 """
 
 import sys
-import sqlite3
 import hashlib
+import time
 from datetime import datetime
 import streamlit as st
 import pandas as pd
 from PIL import Image
 import io
+import base64
+
+# --- FIREBASE IMPORTS ---
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
 
 # =====================================================
-# Page Config (Must be first)
+# Page Config
 # =====================================================
 st.set_page_config(
     page_title="kyna.london",
@@ -24,69 +30,28 @@ st.set_page_config(
 )
 
 # =====================================================
-# Database Functions
+# Database Connection (Firestore)
 # =====================================================
-DB_FILE = "blog_data.db"
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-
-    # Users Table
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY,
-        password TEXT,
-        nickname TEXT,
-        avatar BLOB,
-        role TEXT,
-        is_active INTEGER
-    )""")
-
-    # Posts Table
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS posts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        category TEXT,
-        title TEXT,
-        content TEXT,
-        image BLOB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-
-    # Comments Table
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS comments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        post_id INTEGER,
-        username TEXT,
-        content TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
+# 使用 Streamlit 的缓存功能，防止每次刷新都重新连接 Firebase
+@st.cache_resource
+def get_db():
+    # 检查 Firebase 是否已经初始化，避免重复初始化报错
+    if not firebase_admin._apps:
+        # 从 .streamlit/secrets.toml 读取密钥
+        key_dict = dict(st.secrets["firebase"])
+        cred = credentials.Certificate(key_dict)
+        firebase_admin.initialize_app(cred)
     
-    # Activity Logs Table
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS activity_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        action TEXT,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
+    db = firestore.client()
+    return db
 
-    # Create Admin if not exists
-    c.execute("SELECT * FROM users WHERE username='admin'")
-    if not c.fetchone():
-        pwd = hashlib.sha256("admin123".encode()).hexdigest()
-        c.execute(
-            "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)",
-            ("admin", pwd, "Admin", None, "admin", 1)
-        )
-
-    conn.commit()
-    conn.close()
-
-# Initialize DB on load
-init_db()
+# 初始化数据库连接
+try:
+    db = get_db()
+except Exception as e:
+    st.error(f"无法连接到 Firestore 数据库。请检查 secrets.toml 配置。\n错误信息: {e}")
+    st.stop()
 
 # =====================================================
 # Helpers
@@ -94,15 +59,29 @@ init_db()
 def make_hash(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
 
-def save_image(upload):
-    return upload.getvalue() if upload else None
+def image_to_base64(upload):
+    """将上传的图片转换为 Base64 字符串以便存入 Firestore"""
+    if upload is None:
+        return None
+    bytes_data = upload.getvalue()
+    base64_str = base64.b64encode(bytes_data).decode('utf-8')
+    return base64_str
+
+def base64_to_image(base64_str):
+    """将 Firestore 取出的 Base64 字符串转回图片"""
+    if not base64_str:
+        return None
+    image_data = base64.b64decode(base64_str)
+    return Image.open(io.BytesIO(image_data))
 
 def log_activity(username, action):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO activity_logs (username, action) VALUES (?, ?)", (username, action))
-    conn.commit()
-    conn.close()
+    """记录日志到 Firestore"""
+    doc_ref = db.collection('activity_logs').document()
+    doc_ref.set({
+        'username': username,
+        'action': action,
+        'timestamp': datetime.now()
+    })
 
 def init_session_state():
     if "logged_in" not in st.session_state:
@@ -111,234 +90,102 @@ def init_session_state():
         st.session_state.username = "Guest"
 
 # =====================================================
-# Global CSS & UI Components
+# Global CSS
 # =====================================================
 def inject_custom_css():
     st.markdown("""
     <style>
-    /* ========== Global Theme ========== */
-    .stApp {
-        background-color: #000000;
-        color: #ffffff;
-    }
+    .stApp { background-color: #000000; color: #ffffff; }
+    .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important; }
+    header[data-testid="stHeader"], footer { visibility: hidden; }
+    h1, h2, h3, h4 { font-weight: 600; color: #ffffff !important; }
+    [data-testid="stSidebar"] { background-color: #0f0f0f; border-right: 1px solid #222; }
+    input, textarea { background-color: #1a1a1a !important; color: #ffffff !important; border: 1px solid #333 !important; }
+    div[role="radiogroup"] label { color: #ffffff !important; }
+    .stButton button { background: #1a1a1a; color: #fff; border: 1px solid #333; transition: all 0.2s; }
+    .stButton button:hover { border-color: #666; background: #222; color: #fff; }
     
-    /* Fix Streamlit top padding to prevent content from jumping */
-    .block-container {
-        padding-top: 2rem !important;
-        padding-bottom: 2rem !important;
-    }
-
-    /* Hide standard elements */
-    header[data-testid="stHeader"] {
-        visibility: hidden;
-    }
-    footer {
-        visibility: hidden;
-    }
-
-    h1, h2, h3, h4 {
-        font-weight: 600;
-        color: #ffffff !important;
-    }
-
-    /* ========== Sidebar ========== */
-    [data-testid="stSidebar"] {
-        background-color: #0f0f0f;
-        border-right: 1px solid #222;
-    }
-    
-    /* Sidebar text fix */
-    [data-testid="stSidebar"] p, [data-testid="stSidebar"] label {
-        color: #ffffff;
-    }
-
-    /* ========== Inputs ========== */
-    input, textarea {
-        background-color: #1a1a1a !important;
-        color: #ffffff !important;
-        border: 1px solid #333 !important;
-    }
-    
-    /* Radio Button Fix */
-    div[role="radiogroup"] label {
-        color: #ffffff !important;
-    }
-
-    /* ========== Buttons ========== */
-    .stButton button {
-        background: #1a1a1a;
-        color: #fff;
-        border: 1px solid #333;
-        transition: all 0.2s;
-    }
-    .stButton button:hover {
-        border-color: #666;
-        background: #222;
-        color: #fff;
-    }
-
-    /* ========== Cards ========== */
-    .notion-card {
-        background-color: #0f0f0f;
-        padding: 24px;
-        margin-bottom: 24px;
-        border-radius: 14px;
-        border: 1px solid #222;
-    }
-
-    .comment-section {
-        margin-top: 16px;
-        padding-top: 16px;
-        border-top: 1px solid #222;
-    }
-
-    .comment-box {
-        background: #141414;
-        padding: 10px;
-        margin-top: 8px;
-        border-radius: 8px;
-        font-size: 14px;
-        border-left: 2px solid #444;
-    }
-    
-    .comment-user {
-        font-weight: bold;
-        color: #888;
-        font-size: 12px;
-        margin-bottom: 4px;
-    }
-    
-    /* Logs Table Style */
-    .dataframe {
-        font-size: 12px !important;
-        color: #ddd !important;
-    }
-
-    /* =================================================
-       Mobile Layout Tweaks
-       ================================================= */
-    @media (max-width: 768px) {
-        /* Hide sidebar on mobile */
-        [data-testid="stSidebar"] {
-            display: none;
-        }
-
-        /* Adjust padding for mobile navbar */
-        .block-container {
-            padding-top: 80px !important;
-            padding-left: 16px !important;
-            padding-right: 16px !important;
-        }
-
-        .notion-card {
-            padding: 16px;
-        }
-    }
-
-    /* =================================================
-       Mobile Navbar Components
-       ================================================= */
-    .mobile-header {
-        display: none;
-    }
+    .notion-card { background-color: #0f0f0f; padding: 24px; margin-bottom: 24px; border-radius: 14px; border: 1px solid #222; }
+    .comment-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid #222; }
+    .comment-box { background: #141414; padding: 10px; margin-top: 8px; border-radius: 8px; font-size: 14px; border-left: 2px solid #444; }
+    .comment-user { font-weight: bold; color: #888; font-size: 12px; margin-bottom: 4px; }
+    .dataframe { font-size: 12px !important; color: #ddd !important; }
 
     @media (max-width: 768px) {
-        .mobile-header {
-            display: flex;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 56px;
-            background: #000;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 16px;
-            z-index: 1000;
-            border-bottom: 1px solid #222;
-        }
-
-        .mobile-title {
-            font-size: 16px;
-            font-weight: 600;
-            color: #fff;
-        }
+        [data-testid="stSidebar"] { display: none; }
+        .block-container { padding-top: 80px !important; }
     }
-
-    #menu-toggle {
-        display: none;
-    }
-
-    .mobile-menu {
-        position: fixed;
-        inset: 0;
-        background: #000;
-        padding: 80px 32px;
-        display: none;
-        z-index: 999;
-    }
-
-    #menu-toggle:checked ~ .mobile-menu {
-        display: block;
-    }
-
-    .mobile-menu a {
-        display: block;
-        font-size: 22px;
-        margin-bottom: 28px;
-        text-decoration: none;
-        color: white;
+    
+    .mobile-header { display: none; }
+    @media (max-width: 768px) {
+        .mobile-header { display: flex; position: fixed; top: 0; left: 0; right: 0; height: 56px; background: #000; align-items: center; justify-content: space-between; padding: 0 16px; z-index: 1000; border-bottom: 1px solid #222; }
+        .mobile-title { font-size: 16px; font-weight: 600; color: #fff; }
     }
     </style>
     
-    <!-- Mobile Navbar HTML injected here to reduce flicker -->
     <div class="mobile-header">
-        <label for="menu-toggle" style="font-size:24px;cursor:pointer;color:#fff;">☰</label>
+        <label style="font-size:24px;color:#fff;">☰</label>
         <div class="mobile-title">kyna.london</div>
         <div style="width:24px;"></div>
-    </div>
-    <input type="checkbox" id="menu-toggle"/>
-    <div class="mobile-menu">
-        <label for="menu-toggle" style="font-size:24px;cursor:pointer;color:#fff;">✕</label>
-        <a href="#" onclick="document.getElementById('menu-toggle').checked = false;">Close Menu</a>
-        <div style="margin-top:20px; font-size:14px; color:#666;">
-           (Use Desktop Sidebar for full navigation & login)
-        </div>
     </div>
     """, unsafe_allow_html=True)
 
 # =====================================================
-# User System (Collapsed at bottom)
+# User System (Firestore)
 # =====================================================
+def create_admin_if_not_exists():
+    """Check if admin exists in Firestore, if not create one"""
+    doc_ref = db.collection('users').document('admin')
+    doc = doc_ref.get()
+    if not doc.exists:
+        pwd = make_hash("admin123")
+        doc_ref.set({
+            'username': 'admin',
+            'password': pwd,
+            'nickname': 'Admin',
+            'role': 'admin',
+            'is_active': 1,
+            'is_deleted': 0,
+            'created_at': datetime.now()
+        })
+
 def sidebar_user_system():
+    # Ensure admin exists on startup
+    create_admin_if_not_exists()
+
     if not st.session_state.logged_in:
         with st.sidebar.expander("👤 Log in / Sign up", expanded=False):
             tab1, tab2 = st.tabs(["Login", "Register"])
             
+            # --- LOGIN ---
             with tab1:
                 user = st.text_input("Username", key="login_user")
                 pwd = st.text_input("Password", type="password", key="login_pwd")
                 
                 if st.button("Login", use_container_width=True):
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute("SELECT password, role, is_active FROM users WHERE username=?", (user,))
-                    data = c.fetchone()
-                    conn.close()
+                    # Query Firestore: Collection 'users', Document ID = username
+                    doc_ref = db.collection('users').document(user)
+                    doc = doc_ref.get()
                     
-                    if data and make_hash(pwd) == data[0]:
-                        if data[2] == 1:
-                            st.session_state.logged_in = True
-                            st.session_state.role = data[1]
-                            st.session_state.username = user
-                            log_activity(user, "Logged In")
-                            st.success("Welcome!")
-                            st.rerun()
+                    if doc.exists:
+                        data = doc.to_dict()
+                        # Check password and flags
+                        if make_hash(pwd) == data.get('password') and data.get('is_deleted') == 0:
+                            if data.get('is_active') == 1:
+                                st.session_state.logged_in = True
+                                st.session_state.role = data.get('role')
+                                st.session_state.username = user
+                                log_activity(user, "Logged In")
+                                st.success("Welcome!")
+                                st.rerun()
+                            else:
+                                st.warning("Pending approval.")
                         else:
-                            st.warning("Pending approval.")
+                            st.error("Invalid credentials.")
                     else:
-                        st.error("Invalid credentials.")
+                        st.error("User not found.")
 
+            # --- REGISTER ---
             with tab2:
                 new_user = st.text_input("New Username", key="reg_user")
                 new_pwd = st.text_input("New Password", type="password", key="reg_pwd")
@@ -350,21 +197,22 @@ def sidebar_user_system():
                     elif not new_user or not new_pwd:
                         st.error("Fill all fields.")
                     else:
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        try:
+                        # Check if user already exists
+                        doc_ref = db.collection('users').document(new_user)
+                        if doc_ref.get().exists:
+                            st.error("User exists.")
+                        else:
                             hashed_pwd = make_hash(new_pwd)
-                            c.execute(
-                                "INSERT INTO users (username, password, role, is_active) VALUES (?, ?, ?, ?)", 
-                                (new_user, hashed_pwd, "subscriber", 0)
-                            )
-                            conn.commit()
+                            doc_ref.set({
+                                'username': new_user,
+                                'password': hashed_pwd,
+                                'role': 'subscriber',
+                                'is_active': 0, # Pending
+                                'is_deleted': 0,
+                                'created_at': datetime.now()
+                            })
                             log_activity(new_user, "Registered")
                             st.info("Created! Wait for approval.")
-                        except sqlite3.IntegrityError:
-                            st.error("User exists.")
-                        finally:
-                            conn.close()
 
     else:
         st.sidebar.markdown("---")
@@ -379,11 +227,12 @@ def sidebar_user_system():
             st.rerun()
 
 # =====================================================
-# Content Renderers
+# Content Renderers (Firestore)
 # =====================================================
 def render_feed(category):
     st.markdown(f"## {category}")
 
+    # --- WRITE POST ---
     if st.session_state.get("role") == "admin":
         with st.expander("➕ Write New Post"):
             with st.form(f"new_{category}"):
@@ -391,61 +240,103 @@ def render_feed(category):
                 content = st.text_area("Content", height=150)
                 img = st.file_uploader("Image", type=["png", "jpg"])
                 if st.form_submit_button("Publish"):
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute(
-                        "INSERT INTO posts (category,title,content,image) VALUES (?,?,?,?)",
-                        (category, title, content, save_image(img))
-                    )
-                    conn.commit()
-                    conn.close()
+                    # Add to 'posts' collection
+                    # Firestore auto-generates ID if we use .add()
+                    db.collection('posts').add({
+                        'category': category,
+                        'title': title,
+                        'content': content,
+                        'image_base64': image_to_base64(img),
+                        'created_at': datetime.now(),
+                        'is_deleted': 0
+                    })
                     log_activity(st.session_state.username, f"Published: {title}")
                     st.rerun()
 
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id, title, content, created_at, image FROM posts WHERE category=? ORDER BY created_at DESC", (category,))
-    posts = c.fetchall()
-    conn.close()
+    # --- FETCH POSTS ---
+    # Query: posts where category == X and is_deleted == 0
+    # Note: Complex ordering in Firestore requires an index. 
+    # To avoid index setup errors for this tutorial, we fetch then sort in Python.
+    posts_ref = db.collection('posts')
+    query = posts_ref.where('category', '==', category).where('is_deleted', '==', 0)
+    
+    docs = list(query.stream())
+    # Sort in Python (lambda: sort by created_at desc)
+    # Firestore timestamps are objects, so they sort correctly
+    docs.sort(key=lambda x: x.to_dict().get('created_at', datetime.min), reverse=True)
 
-    for post_id, t, ctt, d, img in posts:
-        st.markdown("<div class='notion-card'>", unsafe_allow_html=True)
-        st.subheader(t)
-        st.caption(f"📅 {d}")
-        if img:
-            st.image(img, use_column_width=True)
-        st.markdown(ctt)
+    for doc in docs:
+        post = doc.to_dict()
+        post_id = doc.id # Firestore Document ID
         
+        st.markdown("<div class='notion-card'>", unsafe_allow_html=True)
+        col_head, col_action = st.columns([8, 1])
+        with col_head:
+            st.subheader(post.get('title'))
+        
+        # Soft Delete
+        if st.session_state.get("role") == "admin":
+            with col_action:
+                if st.button("🗑️", key=f"del_post_{post_id}"):
+                    db.collection('posts').document(post_id).update({'is_deleted': 1})
+                    log_activity(st.session_state.username, f"Deleted post {post_id}")
+                    st.rerun()
+
+        # Display Date
+        created_at = post.get('created_at')
+        if created_at:
+            # Convert Firestore timestamp to readable string
+            date_str = created_at.strftime("%Y-%m-%d %H:%M")
+        else:
+            date_str = ""
+        st.caption(f"📅 {date_str}")
+
+        # Display Image
+        if post.get('image_base64'):
+            try:
+                img_obj = base64_to_image(post.get('image_base64'))
+                st.image(img_obj, use_column_width=True)
+            except:
+                pass # Fail silently on image error
+        
+        st.markdown(post.get('content'))
+        
+        # --- COMMENTS ---
         st.markdown("<div class='comment-section'><h6>Comments</h6>", unsafe_allow_html=True)
         
-        conn = sqlite3.connect(DB_FILE)
-        cc = conn.cursor()
-        cc.execute("SELECT username, content, created_at FROM comments WHERE post_id=? ORDER BY created_at ASC", (post_id,))
-        comments = cc.fetchall()
-        conn.close()
-        
-        if not comments:
+        # Fetch Comments for this post
+        c_query = db.collection('comments').where('post_id', '==', post_id).where('is_deleted', '==', 0).stream()
+        c_list = list(c_query)
+        c_list.sort(key=lambda x: x.to_dict().get('created_at', datetime.min))
+
+        if not c_list:
             st.markdown("<p style='color:#666;font-size:13px;font-style:italic;'>No comments yet.</p>", unsafe_allow_html=True)
         
-        for c_user, c_text, c_date in comments:
+        for c_doc in c_list:
+            c_data = c_doc.to_dict()
+            c_date = c_data.get('created_at').strftime("%Y-%m-%d %H:%M") if c_data.get('created_at') else ""
             st.markdown(f"""
             <div class='comment-box'>
-                <div class='comment-user'>{c_user} <span style='font-weight:normal;opacity:0.6;'>• {c_date}</span></div>
-                {c_text}
+                <div class='comment-user'>{c_data.get('username')} <span style='font-weight:normal;opacity:0.6;'>• {c_date}</span></div>
+                {c_data.get('content')}
             </div>
             """, unsafe_allow_html=True)
+
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # Add Comment Form
         if st.session_state.logged_in and st.session_state.role in ['admin', 'subscriber']:
             with st.form(key=f"comment_form_{post_id}"):
                 new_comment = st.text_area("Add a comment...", height=60, label_visibility="collapsed")
                 c_submit = st.form_submit_button("Post Comment")
                 if c_submit and new_comment:
-                    conn = sqlite3.connect(DB_FILE)
-                    cx = conn.cursor()
-                    cx.execute("INSERT INTO comments (post_id, username, content) VALUES (?, ?, ?)", (post_id, st.session_state.username, new_comment))
-                    conn.commit()
-                    conn.close()
+                    db.collection('comments').add({
+                        'post_id': post_id,
+                        'username': st.session_state.username,
+                        'content': new_comment,
+                        'is_deleted': 0,
+                        'created_at': datetime.now()
+                    })
                     log_activity(st.session_state.username, f"Commented on {post_id}")
                     st.rerun()
         elif not st.session_state.logged_in:
@@ -455,18 +346,22 @@ def render_feed(category):
 
 def render_gallery():
     st.markdown("## Gallery")
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT title, image FROM posts WHERE category='Gallery'")
-    items = c.fetchall()
-    conn.close()
-
+    # Fetch Gallery posts
+    query = db.collection('posts').where('category', '==', 'Gallery').where('is_deleted', '==', 0)
+    docs = list(query.stream())
+    
     cols = st.columns(2)
-    for i, (t, img) in enumerate(items):
+    for i, doc in enumerate(docs):
+        post = doc.to_dict()
         with cols[i % 2]:
-            if img:
-                st.image(img, use_column_width=True)
-            st.caption(t)
+            if post.get('image_base64'):
+                st.image(base64_to_image(post.get('image_base64')), use_column_width=True)
+            st.caption(post.get('title'))
+            
+            if st.session_state.get("role") == "admin":
+                 if st.button("Delete", key=f"del_gal_{doc.id}"):
+                    db.collection('posts').document(doc.id).update({'is_deleted': 1})
+                    st.rerun()
     
     if st.session_state.get("role") == "admin":
         with st.expander("Add to Gallery"):
@@ -475,98 +370,110 @@ def render_gallery():
                 g_img = st.file_uploader("Image", type=["png", "jpg"])
                 if st.form_submit_button("Upload"):
                     if g_img:
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        c.execute("INSERT INTO posts (category, title, content, image) VALUES (?, ?, ?, ?)", ("Gallery", g_title, "", save_image(g_img)))
-                        conn.commit()
-                        conn.close()
+                        db.collection('posts').add({
+                            'category': 'Gallery',
+                            'title': g_title,
+                            'content': '',
+                            'image_base64': image_to_base64(g_img),
+                            'created_at': datetime.now(),
+                            'is_deleted': 0
+                        })
                         log_activity(st.session_state.username, "Uploaded to Gallery")
                         st.rerun()
 
 def render_admin_panel():
     st.markdown("## 🛡️ Admin Panel")
-    tab1, tab2 = st.tabs(["User Approvals", "Activity Logs"])
+    tab1, tab2, tab3 = st.tabs(["User Approvals", "Activity Logs", "Recycle Bin"])
     
+    # 1. Approvals
     with tab1:
-        st.subheader("Pending User Approvals")
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT username FROM users WHERE is_active=0")
-        pending_users = c.fetchall()
+        st.subheader("Pending Users")
+        query = db.collection('users').where('is_active', '==', 0).where('is_deleted', '==', 0)
+        docs = list(query.stream())
         
-        if not pending_users:
+        if not docs:
             st.info("No pending approvals.")
         else:
-            st.markdown("---")
-            for user_tuple in pending_users:
-                username = user_tuple[0]
-                col1, col2, col3 = st.columns([2, 1, 1])
-                with col1: st.markdown(f"**{username}**")
-                with col2:
-                    if st.button("✅ Approve", key=f"approve_{username}"):
-                        c.execute("UPDATE users SET is_active=1 WHERE username=?", (username,))
-                        conn.commit()
-                        log_activity(st.session_state.username, f"Approved user: {username}")
-                        st.rerun()
-                with col3:
-                    if st.button("❌ Reject", key=f"reject_{username}"):
-                        c.execute("DELETE FROM users WHERE username=?", (username,))
-                        conn.commit()
-                        log_activity(st.session_state.username, f"Rejected user: {username}")
-                        st.rerun()
+            for doc in docs:
+                data = doc.to_dict()
+                username = data.get('username')
+                c1, c2, c3 = st.columns([2, 1, 1])
+                c1.markdown(f"**{username}**")
+                if c2.button("✅ Approve", key=f"app_{username}"):
+                    db.collection('users').document(username).update({'is_active': 1})
+                    log_activity(st.session_state.username, f"Approved {username}")
+                    st.rerun()
+                if c3.button("❌ Reject", key=f"rej_{username}"):
+                    db.collection('users').document(username).update({'is_deleted': 1})
+                    log_activity(st.session_state.username, f"Rejected {username}")
+                    st.rerun()
                 st.markdown("---")
-        conn.close()
 
+    # 2. Logs
     with tab2:
-        st.subheader("Global User Activity Logs")
-        conn = sqlite3.connect(DB_FILE)
-        df_logs = pd.read_sql_query("SELECT timestamp, username, action FROM activity_logs ORDER BY timestamp DESC LIMIT 100", conn)
-        conn.close()
-        st.dataframe(df_logs, use_container_width=True)
+        st.subheader("Logs")
+        logs_ref = db.collection('activity_logs').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(50)
+        logs = [x.to_dict() for x in logs_ref.stream()]
+        if logs:
+            st.dataframe(pd.DataFrame(logs), use_container_width=True)
+
+    # 3. Recycle Bin
+    with tab3:
+        st.subheader("🗑️ Recycle Bin")
+        
+        # Deleted Posts
+        st.markdown("##### Deleted Posts")
+        del_posts = list(db.collection('posts').where('is_deleted', '==', 1).stream())
+        if not del_posts: st.caption("No deleted posts.")
+        for doc in del_posts:
+            data = doc.to_dict()
+            c1, c2 = st.columns([3, 1])
+            c1.text(f"[{data.get('category')}] {data.get('title')}")
+            if c2.button("Restore", key=f"res_post_{doc.id}"):
+                db.collection('posts').document(doc.id).update({'is_deleted': 0})
+                st.rerun()
+
+        st.markdown("---")
+        # Deleted Users
+        st.markdown("##### Deleted Users")
+        del_users = list(db.collection('users').where('is_deleted', '==', 1).stream())
+        if not del_users: st.caption("No deleted users.")
+        for doc in del_users:
+            username = doc.id
+            c1, c2 = st.columns([3, 1])
+            c1.text(username)
+            if c2.button("Restore", key=f"res_user_{username}"):
+                db.collection('users').document(username).update({'is_deleted': 0})
+                st.rerun()
 
 # =====================================================
 # Main
 # =====================================================
 def main():
-    # 1. Inject CSS FIRST to prevent flickering
     inject_custom_css()
-    
-    # 2. Initialize Session
     init_session_state()
 
-    # 3. Sidebar Navigation
     st.sidebar.title("kyna.london")
-    
     menu_options = ["Introduce", "Blogs", "Writing", "Gallery"]
     if st.session_state.get("logged_in") and st.session_state.get("role") == "admin":
         menu_options.append("Admin Panel")
 
-    # Fixed key to prevent state loss
-    menu = st.sidebar.radio("Navigate", menu_options, key="main_navigation")
-    
-    # 4. User System (Bottom Sidebar)
+    menu = st.sidebar.radio("Navigate", menu_options, key="nav")
     sidebar_user_system()
     
-    # 5. Logging (Only log if page changed to prevent loops)
     if "last_page" not in st.session_state or st.session_state.last_page != menu:
         log_activity(st.session_state.get("username", "Guest"), f"Viewed Page: {menu}")
         st.session_state.last_page = menu
 
-    # 6. Page Routing
     if menu == "Introduce":
         st.markdown("## About")
         st.markdown("A quiet place for writing, memory, and thinking.")
-    elif menu == "Blogs":
-        render_feed("Blogs")
-    elif menu == "Writing":
-        render_feed("Writing")
-    elif menu == "Gallery":
-        render_gallery()
+    elif menu == "Blogs": render_feed("Blogs")
+    elif menu == "Writing": render_feed("Writing")
+    elif menu == "Gallery": render_gallery()
     elif menu == "Admin Panel":
-        if st.session_state.get("role") == "admin":
-            render_admin_panel()
-        else:
-            st.error("Access Denied")
+        if st.session_state.get("role") == "admin": render_admin_panel()
+        else: st.error("Access Denied")
 
 if __name__ == "__main__":
     main()
