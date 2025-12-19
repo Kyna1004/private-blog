@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 kyna.london — Digital Garden
-Updated with Role-Based Access Control & Activity Logging
+Updated: Navigation First, Login Collapsed
 """
 
 import sys
@@ -291,90 +291,90 @@ def save_image(upload):
 
 def log_activity(username, action):
     """Log user activity to database"""
-    # Simple check to prevent logging the exact same action repeatedly on reruns if desired,
-    # but for simplicity we log interactions here.
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("INSERT INTO activity_logs (username, action) VALUES (?, ?)", (username, action))
     conn.commit()
     conn.close()
 
-# =====================================================
-# User System (Login / Register)
-# =====================================================
-def sidebar_user_system():
-    st.sidebar.title("Account")
-
-    # Initialize session state
+def init_session_state():
+    """Ensure session state variables exist"""
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
         st.session_state.role = "guest"
         st.session_state.username = "Guest"
 
-    # If logged out, show Login/Register tabs
+# =====================================================
+# User System (Login / Register) - MOVED TO BOTTOM
+# =====================================================
+def sidebar_user_system():
+    # If logged out, show Login/Register hidden in an expander
     if not st.session_state.logged_in:
-        tab1, tab2 = st.sidebar.tabs(["Login", "Register"])
-        
-        # --- LOGIN TAB ---
-        with tab1:
-            user = st.text_input("Username", key="login_user")
-            pwd = st.text_input("Password", type="password", key="login_pwd")
+        # Use expander so it doesn't take up space by default
+        with st.sidebar.expander("👤 Log in / Sign up", expanded=False):
+            tab1, tab2 = st.tabs(["Login", "Register"])
             
-            if st.button("Login"):
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute("SELECT password, role, is_active FROM users WHERE username=?", (user,))
-                data = c.fetchone()
-                conn.close()
+            # --- LOGIN TAB ---
+            with tab1:
+                user = st.text_input("Username", key="login_user")
+                pwd = st.text_input("Password", type="password", key="login_pwd")
                 
-                if data and make_hash(pwd) == data[0]:
-                    if data[2] == 1: # check active
-                        st.session_state.logged_in = True
-                        st.session_state.role = data[1] # admin or subscriber
-                        st.session_state.username = user
-                        log_activity(user, "Logged In")
-                        st.success("Welcome back!")
-                        st.rerun()
-                    else:
-                        st.warning("Account pending admin approval.")
-                else:
-                    st.error("Invalid credentials.")
-
-        # --- REGISTER TAB ---
-        with tab2:
-            new_user = st.text_input("New Username", key="reg_user")
-            new_pwd = st.text_input("New Password", type="password", key="reg_pwd")
-            confirm_pwd = st.text_input("Confirm Password", type="password", key="reg_pwd2")
-            
-            if st.button("Sign Up"):
-                if new_pwd != confirm_pwd:
-                    st.error("Passwords do not match.")
-                elif not new_user or not new_pwd:
-                    st.error("Please fill all fields.")
-                else:
+                if st.button("Login", use_container_width=True):
                     conn = sqlite3.connect(DB_FILE)
                     c = conn.cursor()
-                    try:
-                        # Default role is 'subscriber', is_active=0 (Requires Approval)
-                        hashed_pwd = make_hash(new_pwd)
-                        c.execute(
-                            "INSERT INTO users (username, password, role, is_active) VALUES (?, ?, ?, ?)", 
-                            (new_user, hashed_pwd, "subscriber", 0)
-                        )
-                        conn.commit()
-                        log_activity(new_user, "Registered (Pending Approval)")
-                        st.info("Account created! Please wait for admin approval to login.")
-                    except sqlite3.IntegrityError:
-                        st.error("Username already taken.")
-                    finally:
-                        conn.close()
+                    c.execute("SELECT password, role, is_active FROM users WHERE username=?", (user,))
+                    data = c.fetchone()
+                    conn.close()
+                    
+                    if data and make_hash(pwd) == data[0]:
+                        if data[2] == 1: # check active
+                            st.session_state.logged_in = True
+                            st.session_state.role = data[1] # admin or subscriber
+                            st.session_state.username = user
+                            log_activity(user, "Logged In")
+                            st.success("Welcome!")
+                            st.rerun()
+                        else:
+                            st.warning("Pending approval.")
+                    else:
+                        st.error("Invalid credentials.")
 
-    # If logged in, show info and Logout
+            # --- REGISTER TAB ---
+            with tab2:
+                new_user = st.text_input("New Username", key="reg_user")
+                new_pwd = st.text_input("New Password", type="password", key="reg_pwd")
+                confirm_pwd = st.text_input("Confirm Password", type="password", key="reg_pwd2")
+                
+                if st.button("Sign Up", use_container_width=True):
+                    if new_pwd != confirm_pwd:
+                        st.error("Passwords do not match.")
+                    elif not new_user or not new_pwd:
+                        st.error("Fill all fields.")
+                    else:
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        try:
+                            # Default role is 'subscriber', is_active=0 (Requires Approval)
+                            hashed_pwd = make_hash(new_pwd)
+                            c.execute(
+                                "INSERT INTO users (username, password, role, is_active) VALUES (?, ?, ?, ?)", 
+                                (new_user, hashed_pwd, "subscriber", 0)
+                            )
+                            conn.commit()
+                            log_activity(new_user, "Registered")
+                            st.info("Account created! Wait for approval.")
+                        except sqlite3.IntegrityError:
+                            st.error("User exists.")
+                        finally:
+                            conn.close()
+
+    # If logged in, show info clearly
     else:
-        st.sidebar.markdown(f"User: **{st.session_state.username}**")
-        st.sidebar.markdown(f"Role: **{st.session_state.role.capitalize()}**")
+        st.sidebar.markdown("---")
+        st.sidebar.caption("Logged in as:")
+        st.sidebar.markdown(f"**{st.session_state.username}** ({st.session_state.role.capitalize()})")
         
-        if st.sidebar.button("Logout"):
+        if st.sidebar.button("Logout", use_container_width=True):
             log_activity(st.session_state.username, "Logged Out")
             st.session_state.logged_in = False
             st.session_state.role = "guest"
@@ -563,10 +563,12 @@ def render_admin_panel():
 def main():
     mobile_navbar()
     
-    # Sidebar logic
-    sidebar_user_system()
+    # 1. Initialize Session BEFORE anything else
+    init_session_state()
 
-    # Define Menu based on Role
+    # 2. Navigation Menu (MOVED TO TOP)
+    st.sidebar.title("kyna.london")
+    
     menu_options = ["Introduce", "Blogs", "Writing", "Gallery"]
     
     # Only Admin sees Admin Panel
@@ -575,14 +577,11 @@ def main():
 
     menu = st.sidebar.radio("Navigate", menu_options)
     
-    # --- LOG BROWSING HISTORY ---
-    # We log the navigation event. 
-    # To prevent spamming log on every script rerun (e.g. typing in text box),
-    # we could check if menu changed, but for simplicity/robustness in this demo,
-    # we log "Viewing [Page]" if it's a page load.
+    # 3. User Login System (MOVED TO BOTTOM)
+    st.sidebar.markdown("---")
+    sidebar_user_system()
     
-    # Optional: Simple debounce could go here, but strict "record browsing" implies logging access.
-    # We will log it.
+    # --- LOG BROWSING HISTORY ---
     if "last_page" not in st.session_state or st.session_state.last_page != menu:
         log_activity(st.session_state.get("username", "Guest"), f"Viewed Page: {menu}")
         st.session_state.last_page = menu
@@ -598,7 +597,7 @@ def main():
     elif menu == "Gallery":
         render_gallery()
     elif menu == "Admin Panel":
-        # Double check security (in case someone manipulates UI)
+        # Double check security
         if st.session_state.get("role") == "admin":
             render_admin_panel()
         else:
