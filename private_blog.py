@@ -1,501 +1,593 @@
-# -*- coding: utf-8 -*-
-"""
-kyna.london — Digital Garden
-Backend: Google Firestore (Cloud Database)
-"""
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  BookOpen, 
+  Feather, 
+  Aperture, 
+  PenTool, 
+  X, 
+  ArrowLeft, 
+  Heart, 
+  MessageCircle, 
+  Wind, 
+  Calendar,
+  Layers,
+  Send
+} from 'lucide-react';
 
-import sys
-import hashlib
-import time
-from datetime import datetime
-import streamlit as st
-import pandas as pd
-from PIL import Image
-import io
-import base64
+// --- Mock Data ---
 
-# --- FIREBASE IMPORTS ---
-import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import firestore
+const INITIAL_POSTS = [
+  {
+    id: 1,
+    type: 'blog',
+    title: '周二的雨和便利店',
+    date: '2023-10-24',
+    content: '今天下了一整天的雨。躲进便利店的时候，眼镜上全是雾气。买了一份热关东煮，萝卜煮得很透。生活偶尔需要这种微小的确幸，像是在漫长的灰暗里擦亮了一根火柴。',
+    weather: 'rainy',
+    resonance: 12
+  },
+  {
+    id: 2,
+    type: 'writing',
+    category: 'Melancholy', // 忧郁/失恋
+    title: '蓝色的回信',
+    date: '2023-09-15',
+    content: '你说海是倒过来的天。后来我每次看海，都觉得是在坠落。我们在那个夏天把话说尽了，剩下的日子只能用沉默来填补。即使现在想起你，心里的某块地方还是会像被钝器击打一样闷响。',
+    resonance: 45
+  },
+  {
+    id: 3,
+    type: 'gallery',
+    title: '现代性的流动与静止',
+    subtitle: '关于时间感知的随笔',
+    date: '2023-08-01',
+    content: '在这个加速主义的时代，静止变成了一种奢侈品。我们不停地刷新，试图抓住当下的尾巴，却在信息流中失去了对“永恒”的感知能力。或许，真正的反抗不是停下脚步，而是学会在洪流中建立自己的锚点。',
+    resonance: 89
+  },
+  {
+    id: 4,
+    type: 'blog',
+    title: '重新整理书架',
+    date: '2023-10-22',
+    content: '翻出了几本旧书，纸张已经泛黄了。那是大学时期买的，那时候总觉得只要买书就是在学习。现在看来，书架更像是展示给自己的“理想自我”。',
+    weather: 'sunny',
+    resonance: 5
+  },
+  {
+    id: 5,
+    type: 'writing',
+    category: 'Hope', // 希望/工作
+    title: '黎明前的微光',
+    date: '2023-11-01',
+    content: '项目上线的最后一刻，所有人都累瘫在椅子上。窗外的天空泛起鱼肚白，那一刻没有欢呼，只有一种沉甸甸的宁静。努力是有回响的，哪怕它来得很慢。',
+    resonance: 23
+  }
+];
 
-# =====================================================
-# Page Config
-# =====================================================
-st.set_page_config(
-    page_title="kyna.london",
-    page_icon="🖤",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+// --- Utility Components ---
 
-# =====================================================
-# Database Connection (Firestore)
-# =====================================================
+const FadeIn = ({ children, delay = 0 }) => (
+  <div className="animate-fade-in opacity-0" style={{ animationDelay: `${delay}ms`, animationFillMode: 'forwards' }}>
+    {children}
+  </div>
+);
 
-# 使用 Streamlit 的缓存功能，防止每次刷新都重新连接 Firebase
-@st.cache_resource
-def get_db():
-    # 检查 Firebase 是否已经初始化，避免重复初始化报错
-    if not firebase_admin._apps:
-        # 从 .streamlit/secrets.toml 读取密钥
-        try:
-            key_dict = dict(st.secrets["firebase"])
-            cred = credentials.Certificate(key_dict)
-            firebase_admin.initialize_app(cred)
-        except Exception as e:
-            st.error(f"Failed to initialize Firebase: {e}")
-            st.stop()
-    
-    db = firestore.client()
-    return db
+// --- Feature Components ---
 
-# 初始化数据库连接
-try:
-    db = get_db()
-except Exception as e:
-    st.error(f"无法连接到 Firestore 数据库。请检查 secrets.toml 配置。\n错误信息: {e}")
-    st.stop()
+// 1. Admin Editor Modal
+const Editor = ({ isOpen, onClose, onPublish }) => {
+  const [type, setType] = useState('blog');
+  const [content, setContent] = useState('');
+  const [title, setTitle] = useState('');
+  const [category, setCategory] = useState('General');
 
-# =====================================================
-# Helpers
-# =====================================================
-def make_hash(pwd):
-    return hashlib.sha256(pwd.encode()).hexdigest()
+  if (!isOpen) return null;
 
-def image_to_base64(upload):
-    """将上传的图片转换为 Base64 字符串以便存入 Firestore"""
-    if upload is None:
-        return None
-    bytes_data = upload.getvalue()
-    base64_str = base64.b64encode(bytes_data).decode('utf-8')
-    return base64_str
+  const handlePublish = () => {
+    if (!content) return;
+    const newPost = {
+      id: Date.now(),
+      type,
+      title: title || '无题',
+      date: new Date().toISOString().split('T')[0],
+      content,
+      category: type === 'writing' ? category : undefined,
+      resonance: 0
+    };
+    onPublish(newPost);
+    // Reset
+    setContent('');
+    setTitle('');
+    onClose();
+  };
 
-def base64_to_image(base64_str):
-    """将 Firestore 取出的 Base64 字符串转回图片"""
-    if not base64_str:
-        return None
-    try:
-        image_data = base64.b64decode(base64_str)
-        return Image.open(io.BytesIO(image_data))
-    except Exception:
-        return None
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-white/90 backdrop-blur-sm transition-all">
+      <div className="w-full max-w-2xl bg-white p-8 shadow-2xl rounded-sm border border-stone-100">
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-xl font-serif text-stone-800">创作 (Admin Mode)</h2>
+          <button onClick={onClose}><X className="text-stone-400 hover:text-stone-800" /></button>
+        </div>
 
-def log_activity(username, action):
-    """记录日志到 Firestore"""
-    try:
-        db.collection('activity_logs').add({
-            'username': username,
-            'action': action,
-            'timestamp': datetime.now()
-        })
-    except Exception as e:
-        print(f"Log error: {e}")
+        <div className="space-y-4">
+          <div className="flex gap-4 mb-4">
+            {['blog', 'writing', 'gallery'].map((t) => (
+              <button
+                key={t}
+                onClick={() => setType(t)}
+                className={`px-4 py-2 text-sm rounded-full transition-colors ${
+                  type === t ? 'bg-stone-800 text-white' : 'bg-stone-100 text-stone-600'
+                }`}
+              >
+                {t.charAt(0).toUpperCase() + t.slice(1)}
+              </button>
+            ))}
+          </div>
 
-def init_session_state():
-    if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
-        st.session_state.role = "guest"
-        st.session_state.username = "Guest"
+          <input
+            type="text"
+            placeholder="标题..."
+            className="w-full text-2xl font-serif border-b border-stone-200 py-2 focus:outline-none focus:border-stone-500 bg-transparent placeholder-stone-300"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
 
-# =====================================================
-# Global CSS
-# =====================================================
-def inject_custom_css():
-    st.markdown("""
-    <style>
-    .stApp { background-color: #000000; color: #ffffff; }
-    .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important; }
-    header[data-testid="stHeader"], footer { visibility: hidden; }
-    h1, h2, h3, h4 { font-weight: 600; color: #ffffff !important; }
-    [data-testid="stSidebar"] { background-color: #0f0f0f; border-right: 1px solid #222; }
-    input, textarea { background-color: #1a1a1a !important; color: #ffffff !important; border: 1px solid #333 !important; }
-    div[role="radiogroup"] label { color: #ffffff !important; }
-    .stButton button { background: #1a1a1a; color: #fff; border: 1px solid #333; transition: all 0.2s; }
-    .stButton button:hover { border-color: #666; background: #222; color: #fff; }
-    
-    .notion-card { background-color: #0f0f0f; padding: 24px; margin-bottom: 24px; border-radius: 14px; border: 1px solid #222; }
-    .comment-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid #222; }
-    .comment-box { background: #141414; padding: 10px; margin-top: 8px; border-radius: 8px; font-size: 14px; border-left: 2px solid #444; }
-    .comment-user { font-weight: bold; color: #888; font-size: 12px; margin-bottom: 4px; }
-    .dataframe { font-size: 12px !important; color: #ddd !important; }
+          {type === 'writing' && (
+            <select 
+              className="w-full p-2 bg-stone-50 border-none text-stone-600 text-sm focus:ring-0"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            >
+              <option value="Melancholy">失恋/忧郁 (Melancholy)</option>
+              <option value="Hope">希望/工作 (Hope)</option>
+              <option value="Rage">愤怒 (Rage)</option>
+            </select>
+          )}
 
-    @media (max-width: 768px) {
-        [data-testid="stSidebar"] { display: none; }
-        .block-container { padding-top: 80px !important; }
-    }
-    
-    .mobile-header { display: none; }
-    @media (max-width: 768px) {
-        .mobile-header { display: flex; position: fixed; top: 0; left: 0; right: 0; height: 56px; background: #000; align-items: center; justify-content: space-between; padding: 0 16px; z-index: 1000; border-bottom: 1px solid #222; }
-        .mobile-title { font-size: 16px; font-weight: 600; color: #fff; }
-    }
-    </style>
-    
-    <div class="mobile-header">
-        <label style="font-size:24px;color:#fff;">☰</label>
-        <div class="mobile-title">kyna.london</div>
-        <div style="width:24px;"></div>
+          <textarea
+            className="w-full h-64 p-4 bg-stone-50 text-stone-700 font-serif leading-loose focus:outline-none resize-none"
+            placeholder="在这里记录你的灵魂..."
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+          />
+
+          <div className="flex justify-end pt-4">
+            <button 
+              onClick={handlePublish}
+              className="px-8 py-3 bg-stone-800 text-white hover:bg-stone-700 transition-colors font-sans text-sm tracking-widest"
+            >
+              发布
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
-    """, unsafe_allow_html=True)
+  );
+};
 
-# =====================================================
-# User System (Firestore)
-# =====================================================
-def create_admin_if_not_exists():
-    """Check if admin exists in Firestore, if not create one"""
-    try:
-        doc_ref = db.collection('users').document('admin')
-        doc = doc_ref.get()
-        if not doc.exists:
-            pwd = make_hash("admin123")
-            doc_ref.set({
-                'username': 'admin',
-                'password': pwd,
-                'nickname': 'Admin',
-                'role': 'admin',
-                'is_active': 1,
-                'is_deleted': 0,
-                'created_at': datetime.now()
-            })
-    except Exception as e:
-        st.warning(f"Could not check/create admin: {e}")
+// 2. Article Reader (Immersive View)
+const ArticleReader = ({ post, onClose }) => {
+  const [resonanceCount, setResonanceCount] = useState(post.resonance);
+  const [hasResonated, setHasResonated] = useState(false);
+  const [echoText, setEchoText] = useState('');
+  const [echoSent, setEchoSent] = useState(false);
 
-def sidebar_user_system():
-    # Ensure admin exists on startup
-    create_admin_if_not_exists()
+  const handleResonate = () => {
+    if (!hasResonated) {
+      setResonanceCount(c => c + 1);
+      setHasResonated(true);
+    }
+  };
 
-    if not st.session_state.logged_in:
-        with st.sidebar.expander("👤 Log in / Sign up", expanded=False):
-            tab1, tab2 = st.tabs(["Login", "Register"])
-            
-            # --- LOGIN ---
-            with tab1:
-                user = st.text_input("Username", key="login_user")
-                pwd = st.text_input("Password", type="password", key="login_pwd")
-                
-                if st.button("Login", use_container_width=True):
-                    if not user or not pwd:
-                        st.error("Please enter username and password")
-                    else:
-                        # Query Firestore: Collection 'users', Document ID = username
-                        doc_ref = db.collection('users').document(user)
-                        doc = doc_ref.get()
-                        
-                        if doc.exists:
-                            data = doc.to_dict()
-                            # Check password and flags
-                            if make_hash(pwd) == data.get('password') and data.get('is_deleted') == 0:
-                                if data.get('is_active') == 1:
-                                    st.session_state.logged_in = True
-                                    st.session_state.role = data.get('role')
-                                    st.session_state.username = user
-                                    log_activity(user, "Logged In")
-                                    st.success("Welcome!")
-                                    st.rerun()
-                                else:
-                                    st.warning("Pending approval.")
-                            else:
-                                st.error("Invalid credentials.")
-                        else:
-                            st.error("User not found.")
+  const handleEcho = () => {
+    if (echoText.trim()) {
+      setEchoSent(true);
+      setTimeout(() => {
+        setEchoText('');
+        setEchoSent(false); // Reset for demo
+      }, 3000);
+    }
+  };
 
-            # --- REGISTER ---
-            with tab2:
-                new_user = st.text_input("New Username", key="reg_user")
-                new_pwd = st.text_input("New Password", type="password", key="reg_pwd")
-                confirm_pwd = st.text_input("Confirm Password", type="password", key="reg_pwd2")
-                
-                if st.button("Sign Up", use_container_width=True):
-                    if new_pwd != confirm_pwd:
-                        st.error("Passwords mismatch.")
-                    elif not new_user or not new_pwd:
-                        st.error("Fill all fields.")
-                    else:
-                        # Check if user already exists
-                        doc_ref = db.collection('users').document(new_user)
-                        if doc_ref.get().exists:
-                            st.error("User exists.")
-                        else:
-                            hashed_pwd = make_hash(new_pwd)
-                            doc_ref.set({
-                                'username': new_user,
-                                'password': hashed_pwd,
-                                'role': 'subscriber',
-                                'is_active': 0, # Pending
-                                'is_deleted': 0,
-                                'created_at': datetime.now()
-                            })
-                            log_activity(new_user, "Registered")
-                            st.info("Created! Wait for approval.")
+  // Dynamic background based on category for Writing type
+  const getBgClass = () => {
+    if (post.type === 'writing') {
+      if (post.category === 'Melancholy') return 'bg-slate-50';
+      if (post.category === 'Hope') return 'bg-amber-50/30';
+      return 'bg-white';
+    }
+    return 'bg-white';
+  };
 
-    else:
-        st.sidebar.markdown("---")
-        st.sidebar.caption("Logged in as:")
-        st.sidebar.markdown(f"**{st.session_state.username}** ({st.session_state.role.capitalize()})")
-        
-        if st.sidebar.button("Logout", use_container_width=True):
-            log_activity(st.session_state.username, "Logged Out")
-            st.session_state.logged_in = False
-            st.session_state.role = "guest"
-            st.session_state.username = "Guest"
-            st.rerun()
+  return (
+    <div className={`fixed inset-0 z-40 overflow-y-auto ${getBgClass()} transition-colors duration-1000`}>
+      <div className="max-w-3xl mx-auto px-6 py-20 md:py-32 min-h-screen relative">
+        <button 
+          onClick={onClose} 
+          className="fixed top-8 left-8 md:top-12 md:left-20 p-2 rounded-full hover:bg-black/5 transition-colors group"
+        >
+          <ArrowLeft className="w-6 h-6 text-stone-400 group-hover:text-stone-800" />
+        </button>
 
-# =====================================================
-# Content Renderers (Firestore)
-# =====================================================
-def render_feed(category):
-    st.markdown(f"## {category}")
-
-    # --- WRITE POST ---
-    if st.session_state.get("role") == "admin":
-        with st.expander("➕ Write New Post"):
-            with st.form(f"new_{category}"):
-                title = st.text_input("Title")
-                content = st.text_area("Content", height=150)
-                img = st.file_uploader("Image", type=["png", "jpg"])
-                if st.form_submit_button("Publish"):
-                    # Add to 'posts' collection
-                    # Firestore auto-generates ID if we use .add()
-                    db.collection('posts').add({
-                        'category': category,
-                        'title': title,
-                        'content': content,
-                        'image_base64': image_to_base64(img),
-                        'created_at': datetime.now(),
-                        'is_deleted': 0
-                    })
-                    log_activity(st.session_state.username, f"Published: {title}")
-                    st.rerun()
-
-    # --- FETCH POSTS ---
-    # Query: posts where category == X and is_deleted == 0
-    posts_ref = db.collection('posts')
-    query = posts_ref.where('category', '==', category).where('is_deleted', '==', 0)
-    
-    docs = list(query.stream())
-    
-    # Sorting Safe Fix: Use timestamp() to avoid naive/aware datetime comparison errors
-    docs.sort(
-        key=lambda x: x.to_dict().get('created_at').timestamp() if x.to_dict().get('created_at') else 0, 
-        reverse=True
-    )
-
-    for doc in docs:
-        post = doc.to_dict()
-        post_id = doc.id # Firestore Document ID
-        
-        st.markdown("<div class='notion-card'>", unsafe_allow_html=True)
-        col_head, col_action = st.columns([8, 1])
-        with col_head:
-            st.subheader(post.get('title'))
-        
-        # Soft Delete
-        if st.session_state.get("role") == "admin":
-            with col_action:
-                if st.button("🗑️", key=f"del_post_{post_id}"):
-                    db.collection('posts').document(post_id).update({'is_deleted': 1})
-                    log_activity(st.session_state.username, f"Deleted post {post_id}")
-                    st.rerun()
-
-        # Display Date
-        created_at = post.get('created_at')
-        if created_at:
-            # Convert Firestore timestamp to readable string
-            try:
-                date_str = created_at.strftime("%Y-%m-%d %H:%M")
-            except:
-                date_str = str(created_at)
-        else:
-            date_str = ""
-        st.caption(f"{date_str}")
-
-        # Display Image
-        if post.get('image_base64'):
-            img_obj = base64_to_image(post.get('image_base64'))
-            if img_obj:
-                st.image(img_obj, use_column_width=True)
-        
-        st.markdown(post.get('content', ''))
-        
-        # --- COMMENTS ---
-        st.markdown("<div class='comment-section'><h6>Comments</h6>", unsafe_allow_html=True)
-        
-        # Fetch Comments for this post
-        c_query = db.collection('comments').where('post_id', '==', post_id).where('is_deleted', '==', 0).stream()
-        c_list = list(c_query)
-        # Sorting Safe Fix for comments
-        c_list.sort(key=lambda x: x.to_dict().get('created_at').timestamp() if x.to_dict().get('created_at') else 0)
-
-        if not c_list:
-            st.markdown("<p style='color:#666;font-size:13px;font-style:italic;'>No comments yet.</p>", unsafe_allow_html=True)
-        
-        for c_doc in c_list:
-            c_data = c_doc.to_dict()
-            c_time_val = c_data.get('created_at')
-            c_date = c_time_val.strftime("%Y-%m-%d %H:%M") if c_time_val else ""
-            
-            st.markdown(f"""
-            <div class='comment-box'>
-                <div class='comment-user'>{c_data.get('username')} <span style='font-weight:normal;opacity:0.6;'>• {c_date}</span></div>
-                {c_data.get('content')}
+        <article className="prose prose-stone prose-lg mx-auto">
+          <FadeIn>
+            <div className="text-center mb-16">
+              <span className="text-xs tracking-[0.2em] text-stone-400 uppercase">{post.type} · {post.date}</span>
+              <h1 className="text-4xl md:text-5xl font-serif text-stone-900 mt-6 mb-4 leading-tight">{post.title}</h1>
+              {post.type === 'writing' && (
+                <span className="inline-block px-3 py-1 bg-stone-100 text-stone-500 text-xs rounded-full">{post.category}</span>
+              )}
             </div>
-            """, unsafe_allow_html=True)
+          </FadeIn>
 
-        st.markdown("</div>", unsafe_allow_html=True)
+          <FadeIn delay={200}>
+            <div className="font-serif text-lg leading-loose text-stone-700 whitespace-pre-wrap">
+              {post.content}
+            </div>
+          </FadeIn>
 
-        # Add Comment Form
-        if st.session_state.logged_in and st.session_state.role in ['admin', 'subscriber']:
-            with st.form(key=f"comment_form_{post_id}"):
-                new_comment = st.text_area("Add a comment...", height=60, label_visibility="collapsed")
-                c_submit = st.form_submit_button("Post Comment")
-                if c_submit and new_comment:
-                    db.collection('comments').add({
-                        'post_id': post_id,
-                        'username': st.session_state.username,
-                        'content': new_comment,
-                        'is_deleted': 0,
-                        'created_at': datetime.now()
-                    })
-                    log_activity(st.session_state.username, f"Commented on {post_id}")
-                    st.rerun()
-        elif not st.session_state.logged_in:
-             st.markdown("<p style='font-size:12px;color:#444;margin-top:10px;'>Log in to comment.</p>", unsafe_allow_html=True)
+          {/* Interaction Section */}
+          <FadeIn delay={500}>
+            <div className="mt-24 pt-12 border-t border-stone-100 flex flex-col items-center space-y-12">
+              
+              {/* Resonance */}
+              <button 
+                onClick={handleResonate}
+                className={`group flex items-center space-x-3 transition-all duration-500 ${hasResonated ? 'scale-110' : 'hover:scale-105'}`}
+              >
+                <div className={`p-4 rounded-full ${hasResonated ? 'bg-red-50 text-red-500 shadow-inner' : 'bg-stone-50 text-stone-400 group-hover:bg-white group-hover:shadow-lg'}`}>
+                  <Heart className={`w-6 h-6 ${hasResonated ? 'fill-current' : ''}`} />
+                </div>
+                <span className="text-sm font-sans text-stone-400 tracking-widest">
+                  {hasResonated ? '已共鸣' : '共鸣'} {resonanceCount}
+                </span>
+              </button>
 
-        st.markdown("</div>", unsafe_allow_html=True)
+              {/* Echo (Private Comment) */}
+              <div className="w-full max-w-md">
+                <div className="text-center mb-4">
+                  <h3 className="text-sm font-serif text-stone-500">Echo Hole (私密回声)</h3>
+                  <p className="text-xs text-stone-300 mt-1">只有作者能听见你的声音</p>
+                </div>
+                {echoSent ? (
+                  <div className="text-center p-4 text-stone-500 text-sm bg-stone-50 rounded italic">
+                    回声已飘入深海...
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <textarea 
+                      value={echoText}
+                      onChange={(e) => setEchoText(e.target.value)}
+                      className="w-full p-4 bg-transparent border border-stone-200 rounded-sm focus:border-stone-400 focus:outline-none text-sm text-stone-600 resize-none font-serif"
+                      rows="3"
+                      placeholder="在这里写下你的回响..."
+                    />
+                    <button 
+                      onClick={handleEcho}
+                      className="absolute bottom-4 right-4 text-stone-400 hover:text-stone-800"
+                    >
+                      <Send className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+              </div>
 
-def render_gallery():
-    st.markdown("## Gallery")
-    # Fetch Gallery posts
-    query = db.collection('posts').where('category', '==', 'Gallery').where('is_deleted', '==', 0)
-    docs = list(query.stream())
+            </div>
+          </FadeIn>
+        </article>
+      </div>
+    </div>
+  );
+};
+
+// 3. Blog List (The Stream)
+const BlogSection = ({ posts, onRead }) => (
+  <div className="max-w-xl mx-auto py-12 px-6">
+    <div className="absolute left-8 md:left-1/2 top-0 bottom-0 w-px bg-stone-200 -z-10 hidden md:block"></div>
+    {posts.map((post, idx) => (
+      <FadeIn key={post.id} delay={idx * 100}>
+        <div className="mb-16 relative md:flex md:justify-between group cursor-pointer" onClick={() => onRead(post)}>
+          {/* Timeline Dot */}
+          <div className="hidden md:block absolute left-1/2 -ml-[5px] w-[9px] h-[9px] rounded-full bg-stone-300 border-2 border-white mt-2 group-hover:bg-stone-800 transition-colors"></div>
+          
+          <div className="md:w-[45%] md:text-right md:pr-8 mb-2 md:mb-0">
+            <span className="text-xs font-bold tracking-widest text-stone-400">{post.date}</span>
+            <div className="text-stone-300 text-xs mt-1">{post.weather === 'rainy' ? '🌧' : '☀'}</div>
+          </div>
+          <div className="md:w-[45%] md:pl-8">
+            <h3 className="text-lg font-serif text-stone-800 mb-2 group-hover:text-black transition-colors">{post.title}</h3>
+            <p className="text-stone-500 text-sm line-clamp-3 leading-relaxed font-serif">
+              {post.content}
+            </p>
+          </div>
+        </div>
+      </FadeIn>
+    ))}
+  </div>
+);
+
+// 4. Writing List (The Prism)
+const WritingSection = ({ posts, onRead }) => {
+  const [filter, setFilter] = useState('All');
+  const categories = ['All', 'Melancholy', 'Hope', 'Rage'];
+
+  const filteredPosts = filter === 'All' ? posts : posts.filter(p => p.category === filter);
+
+  // Background tint based on active filter
+  const getTint = () => {
+    if (filter === 'Melancholy') return 'bg-slate-50/50';
+    if (filter === 'Hope') return 'bg-amber-50/50';
+    if (filter === 'Rage') return 'bg-red-50/50';
+    return '';
+  };
+
+  return (
+    <div className={`min-h-[80vh] transition-colors duration-1000 ${getTint()}`}>
+      <div className="max-w-4xl mx-auto py-12 px-6">
+        {/* Filter Tabs */}
+        <div className="flex justify-center space-x-8 mb-16">
+          {categories.map(cat => (
+            <button
+              key={cat}
+              onClick={() => setFilter(cat)}
+              className={`text-sm tracking-widest uppercase transition-all duration-300 ${
+                filter === cat 
+                  ? 'text-stone-900 border-b border-stone-900 pb-1' 
+                  : 'text-stone-400 hover:text-stone-600'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+
+        {/* Masonry-ish Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          {filteredPosts.map((post, idx) => (
+            <FadeIn key={post.id} delay={idx * 100}>
+              <div 
+                onClick={() => onRead(post)}
+                className="bg-white p-8 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-500 cursor-pointer border border-stone-50"
+              >
+                <div className="flex justify-between items-start mb-6">
+                  <span className={`text-[10px] uppercase tracking-wider px-2 py-1 rounded-sm ${
+                    post.category === 'Melancholy' ? 'bg-slate-100 text-slate-600' :
+                    post.category === 'Hope' ? 'bg-amber-100 text-amber-600' :
+                    'bg-stone-100 text-stone-600'
+                  }`}>
+                    {post.category}
+                  </span>
+                  <span className="text-xs text-stone-300">{post.date}</span>
+                </div>
+                <h3 className="text-xl font-serif text-stone-800 mb-4">{post.title}</h3>
+                <p className="text-stone-500 text-sm leading-7 line-clamp-4 font-serif">
+                  {post.content}
+                </p>
+              </div>
+            </FadeIn>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// 5. Gallery List (The Exhibition)
+const GallerySection = ({ posts, onRead }) => (
+  <div className="max-w-3xl mx-auto py-20 px-6">
+    {posts.map((post, idx) => (
+      <FadeIn key={post.id} delay={idx * 200}>
+        <div 
+          onClick={() => onRead(post)}
+          className="mb-32 group cursor-pointer border-l-2 border-transparent hover:border-stone-900 pl-6 transition-all duration-500"
+        >
+          <div className="text-xs tracking-[0.3em] text-stone-400 uppercase mb-4">Exhibit No. 0{idx + 1}</div>
+          <h2 className="text-4xl md:text-6xl font-serif text-stone-900 mb-6 leading-tight group-hover:italic transition-all">
+            {post.title}
+          </h2>
+          {post.subtitle && (
+            <p className="text-xl text-stone-500 font-serif italic mb-6">{post.subtitle}</p>
+          )}
+          <div className="h-px w-12 bg-stone-300 group-hover:w-24 transition-all duration-700"></div>
+          <div className="mt-6 text-stone-400 text-sm font-sans tracking-wide opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+            Click to View Thought
+          </div>
+        </div>
+      </FadeIn>
+    ))}
     
-    cols = st.columns(2)
-    for i, doc in enumerate(docs):
-        post = doc.to_dict()
-        with cols[i % 2]:
-            if post.get('image_base64'):
-                img_obj = base64_to_image(post.get('image_base64'))
-                if img_obj:
-                    st.image(img_obj, use_column_width=True)
-            st.caption(post.get('title'))
+    <div className="text-center py-20 text-stone-300 text-xs tracking-widest">
+      END OF EXHIBITION
+    </div>
+  </div>
+);
+
+// --- Main App Component ---
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState('home'); // home, blog, writing, gallery
+  const [posts, setPosts] = useState(INITIAL_POSTS);
+  const [readingPost, setReadingPost] = useState(null);
+  const [isEditorOpen, setIsEditorOpen] = useState(false);
+
+  // Global style injection for custom animations
+  useEffect(() => {
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes fade-in {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .animate-fade-in {
+        animation-name: fade-in;
+        animation-duration: 0.8s;
+        animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+      /* Custom scrollbar for webkit */
+      ::-webkit-scrollbar { width: 6px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #e7e5e4; border-radius: 3px; }
+      ::-webkit-scrollbar-thumb:hover { background: #a8a29e; }
+
+      /* --- 字体优化 (Font Customization) --- */
+      
+      /* 小字/UI (Notion/Apple Style): 干净、现代、系统原生 */
+      body, .font-sans {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, "Apple Color Emoji", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "WenQuanYi Micro Hei" !important;
+      }
+
+      /* 文学/标题 (Simple Classical): 宋体优先，营造书卷气 */
+      .font-serif {
+        font-family: "Songti SC", "Noto Serif SC", "SimSun", "STSong", "Times New Roman", "Lyon-Text", "Georgia", serif !important;
+      }
+    `;
+    document.head.appendChild(style);
+    return () => document.head.removeChild(style);
+  }, []);
+
+  const handlePublish = (newPost) => {
+    setPosts([newPost, ...posts]);
+  };
+
+  const filteredPosts = (type) => posts.filter(p => p.type === type);
+
+  // Home Page Component
+  const Home = () => (
+    <div className="min-h-screen flex flex-col justify-center items-center relative overflow-hidden">
+      <FadeIn>
+        <h1 className="text-6xl md:text-8xl font-serif text-stone-900 tracking-tighter mb-4 text-center">
+          TRIAD
+          <span className="text-stone-300 text-6xl">.</span>
+        </h1>
+        <p className="text-center text-stone-500 font-serif italic mb-16 tracking-wide">
+          Time · Emotion · Thought
+        </p>
+      </FadeIn>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-12 md:gap-24 text-center z-10">
+        <button 
+          onClick={() => setActiveTab('blog')}
+          className="group flex flex-col items-center space-y-4 transition-transform hover:-translate-y-2"
+        >
+          <div className="p-6 rounded-full bg-stone-50 group-hover:bg-stone-100 transition-colors">
+            <Feather className="w-6 h-6 text-stone-600" />
+          </div>
+          <span className="font-sans text-xs tracking-[0.2em] uppercase text-stone-400 group-hover:text-stone-900 transition-colors">Blogs</span>
+        </button>
+
+        <button 
+          onClick={() => setActiveTab('writing')}
+          className="group flex flex-col items-center space-y-4 transition-transform hover:-translate-y-2"
+        >
+          <div className="p-6 rounded-full bg-stone-50 group-hover:bg-stone-100 transition-colors">
+            <BookOpen className="w-6 h-6 text-stone-600" />
+          </div>
+          <span className="font-sans text-xs tracking-[0.2em] uppercase text-stone-400 group-hover:text-stone-900 transition-colors">Writing</span>
+        </button>
+
+        <button 
+          onClick={() => setActiveTab('gallery')}
+          className="group flex flex-col items-center space-y-4 transition-transform hover:-translate-y-2"
+        >
+          <div className="p-6 rounded-full bg-stone-50 group-hover:bg-stone-100 transition-colors">
+            <Aperture className="w-6 h-6 text-stone-600" />
+          </div>
+          <span className="font-sans text-xs tracking-[0.2em] uppercase text-stone-400 group-hover:text-stone-900 transition-colors">Gallery</span>
+        </button>
+      </div>
+
+      <div className="absolute bottom-12 text-stone-300 text-[10px] tracking-widest">
+        EST. 2024 · PERSONAL SPACE
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-white text-stone-800 selection:bg-stone-200 selection:text-stone-900 font-sans">
+      
+      {/* Navigation (Only show if not on home) */}
+      {activeTab !== 'home' && !readingPost && (
+        <nav className="sticky top-0 z-30 bg-white/80 backdrop-blur-md border-b border-stone-100">
+          <div className="max-w-6xl mx-auto px-6 h-20 flex justify-between items-center">
+            <button 
+              onClick={() => setActiveTab('home')}
+              className="text-xl font-serif font-bold tracking-tight hover:opacity-70 transition-opacity"
+            >
+              TRIAD.
+            </button>
+            <div className="flex space-x-8">
+              {['blog', 'writing', 'gallery'].map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setActiveTab(t)}
+                  className={`text-xs uppercase tracking-widest transition-colors ${
+                    activeTab === t ? 'text-stone-900 font-bold' : 'text-stone-400 hover:text-stone-600'
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+        </nav>
+      )}
+
+      {/* Main Content Area */}
+      <main className="min-h-screen">
+        {readingPost ? (
+          <ArticleReader post={readingPost} onClose={() => setReadingPost(null)} />
+        ) : (
+          <>
+            {activeTab === 'home' && <Home />}
             
-            if st.session_state.get("role") == "admin":
-                 if st.button("Delete", key=f"del_gal_{doc.id}"):
-                    db.collection('posts').document(doc.id).update({'is_deleted': 1})
-                    st.rerun()
-    
-    if st.session_state.get("role") == "admin":
-        with st.expander("Add to Gallery"):
-            with st.form("gallery_upload"):
-                g_title = st.text_input("Caption")
-                g_img = st.file_uploader("Image", type=["png", "jpg"])
-                if st.form_submit_button("Upload"):
-                    if g_img:
-                        db.collection('posts').add({
-                            'category': 'Gallery',
-                            'title': g_title,
-                            'content': '',
-                            'image_base64': image_to_base64(g_img),
-                            'created_at': datetime.now(),
-                            'is_deleted': 0
-                        })
-                        log_activity(st.session_state.username, "Uploaded to Gallery")
-                        st.rerun()
+            {activeTab === 'blog' && (
+              <div className="animate-fade-in">
+                <header className="py-20 text-center">
+                  <h2 className="text-3xl font-serif text-stone-800 mb-2">流动的日常</h2>
+                  <p className="text-xs text-stone-400 tracking-widest uppercase">The Stream of Time</p>
+                </header>
+                <BlogSection posts={filteredPosts('blog')} onRead={setReadingPost} />
+              </div>
+            )}
 
-def render_admin_panel():
-    st.markdown("## 🛡️ Admin Panel")
-    tab1, tab2, tab3 = st.tabs(["User Approvals", "Activity Logs", "Recycle Bin"])
-    
-    # 1. Approvals
-    with tab1:
-        st.subheader("Pending Users")
-        query = db.collection('users').where('is_active', '==', 0).where('is_deleted', '==', 0)
-        docs = list(query.stream())
-        
-        if not docs:
-            st.info("No pending approvals.")
-        else:
-            for doc in docs:
-                data = doc.to_dict()
-                username = data.get('username')
-                c1, c2, c3 = st.columns([2, 1, 1])
-                c1.markdown(f"**{username}**")
-                if c2.button("✅ Approve", key=f"app_{username}"):
-                    db.collection('users').document(username).update({'is_active': 1})
-                    log_activity(st.session_state.username, f"Approved {username}")
-                    st.rerun()
-                if c3.button("❌ Reject", key=f"rej_{username}"):
-                    db.collection('users').document(username).update({'is_deleted': 1})
-                    log_activity(st.session_state.username, f"Rejected {username}")
-                    st.rerun()
-                st.markdown("---")
+            {activeTab === 'writing' && (
+              <div className="animate-fade-in">
+                <header className="py-20 text-center">
+                  <h2 className="text-3xl font-serif text-stone-800 mb-2">情感棱镜</h2>
+                  <p className="text-xs text-stone-400 tracking-widest uppercase">Prism of Emotions</p>
+                </header>
+                <WritingSection posts={filteredPosts('writing')} onRead={setReadingPost} />
+              </div>
+            )}
 
-    # 2. Logs
-    with tab2:
-        st.subheader("Logs")
-        logs_ref = db.collection('activity_logs').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(50)
-        logs = [x.to_dict() for x in logs_ref.stream()]
-        if logs:
-            st.dataframe(pd.DataFrame(logs), use_container_width=True)
+            {activeTab === 'gallery' && (
+              <div className="animate-fade-in">
+                <header className="py-20 text-center">
+                  <h2 className="text-3xl font-serif text-stone-800 mb-2">思想展厅</h2>
+                  <p className="text-xs text-stone-400 tracking-widest uppercase">The Exhibition</p>
+                </header>
+                <GallerySection posts={filteredPosts('gallery')} onRead={setReadingPost} />
+              </div>
+            )}
+          </>
+        )}
+      </main>
 
-    # 3. Recycle Bin
-    with tab3:
-        st.subheader("🗑️ Recycle Bin")
-        
-        # Deleted Posts
-        st.markdown("##### Deleted Posts")
-        del_posts = list(db.collection('posts').where('is_deleted', '==', 1).stream())
-        if not del_posts: st.caption("No deleted posts.")
-        for doc in del_posts:
-            data = doc.to_dict()
-            c1, c2 = st.columns([3, 1])
-            c1.text(f"[{data.get('category')}] {data.get('title')}")
-            if c2.button("Restore", key=f"res_post_{doc.id}"):
-                db.collection('posts').document(doc.id).update({'is_deleted': 0})
-                st.rerun()
+      {/* Admin Trigger (Bottom Right Corner) */}
+      <button 
+        onClick={() => setIsEditorOpen(true)}
+        className="fixed bottom-8 right-8 p-3 bg-black text-white rounded-full shadow-lg hover:scale-110 transition-transform z-30 opacity-20 hover:opacity-100"
+        title="Admin Write"
+      >
+        <PenTool className="w-5 h-5" />
+      </button>
 
-        st.markdown("---")
-        # Deleted Users
-        st.markdown("##### Deleted Users")
-        del_users = list(db.collection('users').where('is_deleted', '==', 1).stream())
-        if not del_users: st.caption("No deleted users.")
-        for doc in del_users:
-            username = doc.id
-            c1, c2 = st.columns([3, 1])
-            c1.text(username)
-            if c2.button("Restore", key=f"res_user_{username}"):
-                db.collection('users').document(username).update({'is_deleted': 0})
-                st.rerun()
-
-# =====================================================
-# Main
-# =====================================================
-def main():
-    inject_custom_css()
-    init_session_state()
-
-    st.sidebar.title("kyna.london")
-    menu_options = ["Introduce", "Blogs", "Writing", "Gallery"]
-    if st.session_state.get("logged_in") and st.session_state.get("role") == "admin":
-        menu_options.append("Admin Panel")
-
-    menu = st.sidebar.radio("Navigate", menu_options, key="nav")
-    sidebar_user_system()
-    
-    if "last_page" not in st.session_state or st.session_state.last_page != menu:
-        log_activity(st.session_state.get("username", "Guest"), f"Viewed Page: {menu}")
-        st.session_state.last_page = menu
-
-    if menu == "Introduce":
-        st.markdown("## About")
-        st.markdown("A quiet place for writing, memory, and thinking.")
-    elif menu == "Blogs": render_feed("Blogs")
-    elif menu == "Writing": render_feed("Writing")
-    elif menu == "Gallery": render_gallery()
-    elif menu == "Admin Panel":
-        if st.session_state.get("role") == "admin": render_admin_panel()
-        else: st.error("Access Denied")
-
-if __name__ == "__main__":
-    main()
+      {/* Modals */}
+      <Editor 
+        isOpen={isEditorOpen} 
+        onClose={() => setIsEditorOpen(false)} 
+        onPublish={handlePublish} 
+      />
+    </div>
+  );
+}
