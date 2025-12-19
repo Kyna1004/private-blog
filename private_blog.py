@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 kyna.london — Digital Garden
-Updated with User Registration & Comment System
+Updated with Role-Based Access Control & Activity Logging
 """
 
 import sys
@@ -98,6 +98,12 @@ def local_css():
         color: #888;
         font-size: 12px;
         margin-bottom: 4px;
+    }
+    
+    /* Logs Table Style */
+    .dataframe {
+        font-size: 12px !important;
+        color: #ddd !important;
     }
 
     /* =================================================
@@ -249,6 +255,15 @@ def init_db():
         content TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
+    
+    # Activity Logs Table (NEW)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS activity_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT,
+        action TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
 
     # Create Admin if not exists
     c.execute("SELECT * FROM users WHERE username='admin'")
@@ -273,6 +288,16 @@ def make_hash(pwd):
 
 def save_image(upload):
     return upload.getvalue() if upload else None
+
+def log_activity(username, action):
+    """Log user activity to database"""
+    # Simple check to prevent logging the exact same action repeatedly on reruns if desired,
+    # but for simplicity we log interactions here.
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO activity_logs (username, action) VALUES (?, ?)", (username, action))
+    conn.commit()
+    conn.close()
 
 # =====================================================
 # User System (Login / Register)
@@ -307,10 +332,11 @@ def sidebar_user_system():
                         st.session_state.logged_in = True
                         st.session_state.role = data[1] # admin or subscriber
                         st.session_state.username = user
+                        log_activity(user, "Logged In")
                         st.success("Welcome back!")
                         st.rerun()
                     else:
-                        st.error("Account suspended.")
+                        st.warning("Account pending admin approval.")
                 else:
                     st.error("Invalid credentials.")
 
@@ -329,14 +355,15 @@ def sidebar_user_system():
                     conn = sqlite3.connect(DB_FILE)
                     c = conn.cursor()
                     try:
-                        # Default role is 'subscriber'
+                        # Default role is 'subscriber', is_active=0 (Requires Approval)
                         hashed_pwd = make_hash(new_pwd)
                         c.execute(
                             "INSERT INTO users (username, password, role, is_active) VALUES (?, ?, ?, ?)", 
-                            (new_user, hashed_pwd, "subscriber", 1)
+                            (new_user, hashed_pwd, "subscriber", 0)
                         )
                         conn.commit()
-                        st.success("Account created! Please log in.")
+                        log_activity(new_user, "Registered (Pending Approval)")
+                        st.info("Account created! Please wait for admin approval to login.")
                     except sqlite3.IntegrityError:
                         st.error("Username already taken.")
                     finally:
@@ -348,6 +375,7 @@ def sidebar_user_system():
         st.sidebar.markdown(f"Role: **{st.session_state.role.capitalize()}**")
         
         if st.sidebar.button("Logout"):
+            log_activity(st.session_state.username, "Logged Out")
             st.session_state.logged_in = False
             st.session_state.role = "guest"
             st.session_state.username = "Guest"
@@ -359,7 +387,8 @@ def sidebar_user_system():
 def render_feed(category):
     st.markdown(f"## {category}")
 
-    # --- ADMIN: Create Post ---
+    # --- PERMISSION 1: WRITING ---
+    # Only Admin can write/publish
     if st.session_state.get("role") == "admin":
         with st.expander("➕ Write New Post"):
             with st.form(f"new_{category}"):
@@ -375,12 +404,12 @@ def render_feed(category):
                     )
                     conn.commit()
                     conn.close()
+                    log_activity(st.session_state.username, f"Published Post: {title}")
                     st.rerun()
 
     # --- Fetch Posts ---
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Updated Query to include ID for comments linkage
     c.execute("SELECT id, title, content, created_at, image FROM posts WHERE category=? ORDER BY created_at DESC", (category,))
     posts = c.fetchall()
     conn.close()
@@ -389,7 +418,6 @@ def render_feed(category):
     for post_id, t, ctt, d, img in posts:
         st.markdown("<div class='notion-card'>", unsafe_allow_html=True)
         
-        # Post Content
         st.subheader(t)
         st.caption(f"📅 {d}")
         if img:
@@ -419,7 +447,8 @@ def render_feed(category):
 
         st.markdown("</div>", unsafe_allow_html=True) # End comment section div
 
-        # 2. Add Comment Form (Only for Admin or Subscriber)
+        # --- PERMISSION 2: COMMENTING ---
+        # Admin AND Subscriber can comment. Guest cannot.
         if st.session_state.logged_in and st.session_state.role in ['admin', 'subscriber']:
             with st.form(key=f"comment_form_{post_id}"):
                 new_comment = st.text_area("Add a comment...", height=60, label_visibility="collapsed")
@@ -434,9 +463,10 @@ def render_feed(category):
                     )
                     conn.commit()
                     conn.close()
+                    log_activity(st.session_state.username, f"Commented on post ID {post_id}")
                     st.rerun()
         elif not st.session_state.logged_in:
-             st.markdown("<p style='font-size:12px;color:#444;margin-top:10px;'>Log in to comment.</p>", unsafe_allow_html=True)
+             st.markdown("<p style='font-size:12px;color:#444;margin-top:10px;'>Log in (Subscriber/Admin) to comment.</p>", unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True) # End notion-card
 
@@ -444,7 +474,6 @@ def render_gallery():
     st.markdown("## Gallery")
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Assuming Gallery items are also stored in posts but usually just images
     c.execute("SELECT title, image FROM posts WHERE category='Gallery'")
     items = c.fetchall()
     conn.close()
@@ -456,7 +485,7 @@ def render_gallery():
                 st.image(img, use_column_width=True)
             st.caption(t)
     
-    # Admin upload for gallery
+    # PERMISSION: Only Admin upload
     if st.session_state.get("role") == "admin":
         with st.expander("Add to Gallery"):
             with st.form("gallery_upload"):
@@ -472,7 +501,61 @@ def render_gallery():
                         )
                         conn.commit()
                         conn.close()
+                        log_activity(st.session_state.username, "Uploaded to Gallery")
                         st.rerun()
+
+def render_admin_panel():
+    st.markdown("## 🛡️ Admin Panel")
+    
+    # --- TAB SYSTEM FOR ADMIN ---
+    tab1, tab2 = st.tabs(["User Approvals", "Activity Logs"])
+    
+    # --- PERMISSION 3: MANAGE SUBSCRIBERS ---
+    with tab1:
+        st.subheader("Pending User Approvals")
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        # Fetch inactive users
+        c.execute("SELECT username FROM users WHERE is_active=0")
+        pending_users = c.fetchall()
+        
+        if not pending_users:
+            st.info("No pending approvals.")
+        else:
+            st.markdown("---")
+            for user_tuple in pending_users:
+                username = user_tuple[0]
+                col1, col2, col3 = st.columns([2, 1, 1])
+                
+                with col1:
+                    st.markdown(f"**{username}**")
+                
+                with col2:
+                    if st.button("✅ Approve", key=f"approve_{username}"):
+                        c.execute("UPDATE users SET is_active=1 WHERE username=?", (username,))
+                        conn.commit()
+                        log_activity(st.session_state.username, f"Approved user: {username}")
+                        st.rerun()
+                
+                with col3:
+                    if st.button("❌ Reject", key=f"reject_{username}"):
+                        c.execute("DELETE FROM users WHERE username=?", (username,))
+                        conn.commit()
+                        log_activity(st.session_state.username, f"Rejected user: {username}")
+                        st.rerun()
+                st.markdown("---")
+        conn.close()
+
+    # --- PERMISSION 4: VIEW ALL BROWSING RECORDS ---
+    with tab2:
+        st.subheader("Global User Activity Logs")
+        conn = sqlite3.connect(DB_FILE)
+        # Load logs into dataframe for nice display
+        df_logs = pd.read_sql_query("SELECT timestamp, username, action FROM activity_logs ORDER BY timestamp DESC LIMIT 100", conn)
+        conn.close()
+        
+        st.dataframe(df_logs, use_container_width=True)
+
 
 # =====================================================
 # Main
@@ -480,11 +563,31 @@ def render_gallery():
 def main():
     mobile_navbar()
     
-    # Sidebar only visible on desktop (handled by CSS), but logic runs here
+    # Sidebar logic
     sidebar_user_system()
 
-    menu = st.sidebar.radio("Navigate", ["Introduce", "Blogs", "Writing", "Gallery"])
+    # Define Menu based on Role
+    menu_options = ["Introduce", "Blogs", "Writing", "Gallery"]
+    
+    # Only Admin sees Admin Panel
+    if st.session_state.get("logged_in") and st.session_state.get("role") == "admin":
+        menu_options.append("Admin Panel")
 
+    menu = st.sidebar.radio("Navigate", menu_options)
+    
+    # --- LOG BROWSING HISTORY ---
+    # We log the navigation event. 
+    # To prevent spamming log on every script rerun (e.g. typing in text box),
+    # we could check if menu changed, but for simplicity/robustness in this demo,
+    # we log "Viewing [Page]" if it's a page load.
+    
+    # Optional: Simple debounce could go here, but strict "record browsing" implies logging access.
+    # We will log it.
+    if "last_page" not in st.session_state or st.session_state.last_page != menu:
+        log_activity(st.session_state.get("username", "Guest"), f"Viewed Page: {menu}")
+        st.session_state.last_page = menu
+
+    # Routing
     if menu == "Introduce":
         st.markdown("## About")
         st.markdown("A quiet place for writing, memory, and thinking.")
@@ -494,6 +597,12 @@ def main():
         render_feed("Writing")
     elif menu == "Gallery":
         render_gallery()
+    elif menu == "Admin Panel":
+        # Double check security (in case someone manipulates UI)
+        if st.session_state.get("role") == "admin":
+            render_admin_panel()
+        else:
+            st.error("Access Denied")
 
 if __name__ == "__main__":
     main()
