@@ -39,9 +39,13 @@ def get_db():
     # 检查 Firebase 是否已经初始化，避免重复初始化报错
     if not firebase_admin._apps:
         # 从 .streamlit/secrets.toml 读取密钥
-        key_dict = dict(st.secrets["firebase"])
-        cred = credentials.Certificate(key_dict)
-        firebase_admin.initialize_app(cred)
+        try:
+            key_dict = dict(st.secrets["firebase"])
+            cred = credentials.Certificate(key_dict)
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            st.error(f"Failed to initialize Firebase: {e}")
+            st.stop()
     
     db = firestore.client()
     return db
@@ -71,17 +75,22 @@ def base64_to_image(base64_str):
     """将 Firestore 取出的 Base64 字符串转回图片"""
     if not base64_str:
         return None
-    image_data = base64.b64decode(base64_str)
-    return Image.open(io.BytesIO(image_data))
+    try:
+        image_data = base64.b64decode(base64_str)
+        return Image.open(io.BytesIO(image_data))
+    except Exception:
+        return None
 
 def log_activity(username, action):
     """记录日志到 Firestore"""
-    doc_ref = db.collection('activity_logs').document()
-    doc_ref.set({
-        'username': username,
-        'action': action,
-        'timestamp': datetime.now()
-    })
+    try:
+        db.collection('activity_logs').add({
+            'username': username,
+            'action': action,
+            'timestamp': datetime.now()
+        })
+    except Exception as e:
+        print(f"Log error: {e}")
 
 def init_session_state():
     if "logged_in" not in st.session_state:
@@ -135,19 +144,22 @@ def inject_custom_css():
 # =====================================================
 def create_admin_if_not_exists():
     """Check if admin exists in Firestore, if not create one"""
-    doc_ref = db.collection('users').document('admin')
-    doc = doc_ref.get()
-    if not doc.exists:
-        pwd = make_hash("admin123")
-        doc_ref.set({
-            'username': 'admin',
-            'password': pwd,
-            'nickname': 'Admin',
-            'role': 'admin',
-            'is_active': 1,
-            'is_deleted': 0,
-            'created_at': datetime.now()
-        })
+    try:
+        doc_ref = db.collection('users').document('admin')
+        doc = doc_ref.get()
+        if not doc.exists:
+            pwd = make_hash("admin123")
+            doc_ref.set({
+                'username': 'admin',
+                'password': pwd,
+                'nickname': 'Admin',
+                'role': 'admin',
+                'is_active': 1,
+                'is_deleted': 0,
+                'created_at': datetime.now()
+            })
+    except Exception as e:
+        st.warning(f"Could not check/create admin: {e}")
 
 def sidebar_user_system():
     # Ensure admin exists on startup
@@ -163,27 +175,30 @@ def sidebar_user_system():
                 pwd = st.text_input("Password", type="password", key="login_pwd")
                 
                 if st.button("Login", use_container_width=True):
-                    # Query Firestore: Collection 'users', Document ID = username
-                    doc_ref = db.collection('users').document(user)
-                    doc = doc_ref.get()
-                    
-                    if doc.exists:
-                        data = doc.to_dict()
-                        # Check password and flags
-                        if make_hash(pwd) == data.get('password') and data.get('is_deleted') == 0:
-                            if data.get('is_active') == 1:
-                                st.session_state.logged_in = True
-                                st.session_state.role = data.get('role')
-                                st.session_state.username = user
-                                log_activity(user, "Logged In")
-                                st.success("Welcome!")
-                                st.rerun()
-                            else:
-                                st.warning("Pending approval.")
-                        else:
-                            st.error("Invalid credentials.")
+                    if not user or not pwd:
+                        st.error("Please enter username and password")
                     else:
-                        st.error("User not found.")
+                        # Query Firestore: Collection 'users', Document ID = username
+                        doc_ref = db.collection('users').document(user)
+                        doc = doc_ref.get()
+                        
+                        if doc.exists:
+                            data = doc.to_dict()
+                            # Check password and flags
+                            if make_hash(pwd) == data.get('password') and data.get('is_deleted') == 0:
+                                if data.get('is_active') == 1:
+                                    st.session_state.logged_in = True
+                                    st.session_state.role = data.get('role')
+                                    st.session_state.username = user
+                                    log_activity(user, "Logged In")
+                                    st.success("Welcome!")
+                                    st.rerun()
+                                else:
+                                    st.warning("Pending approval.")
+                            else:
+                                st.error("Invalid credentials.")
+                        else:
+                            st.error("User not found.")
 
             # --- REGISTER ---
             with tab2:
@@ -255,15 +270,16 @@ def render_feed(category):
 
     # --- FETCH POSTS ---
     # Query: posts where category == X and is_deleted == 0
-    # Note: Complex ordering in Firestore requires an index. 
-    # To avoid index setup errors for this tutorial, we fetch then sort in Python.
     posts_ref = db.collection('posts')
     query = posts_ref.where('category', '==', category).where('is_deleted', '==', 0)
     
     docs = list(query.stream())
-    # Sort in Python (lambda: sort by created_at desc)
-    # Firestore timestamps are objects, so they sort correctly
-    docs.sort(key=lambda x: x.to_dict().get('created_at', datetime.min), reverse=True)
+    
+    # Sorting Safe Fix: Use timestamp() to avoid naive/aware datetime comparison errors
+    docs.sort(
+        key=lambda x: x.to_dict().get('created_at').timestamp() if x.to_dict().get('created_at') else 0, 
+        reverse=True
+    )
 
     for doc in docs:
         post = doc.to_dict()
@@ -286,20 +302,21 @@ def render_feed(category):
         created_at = post.get('created_at')
         if created_at:
             # Convert Firestore timestamp to readable string
-            date_str = created_at.strftime("%Y-%m-%d %H:%M")
+            try:
+                date_str = created_at.strftime("%Y-%m-%d %H:%M")
+            except:
+                date_str = str(created_at)
         else:
             date_str = ""
-        st.caption(f"📅 {date_str}")
+        st.caption(f"{date_str}")
 
         # Display Image
         if post.get('image_base64'):
-            try:
-                img_obj = base64_to_image(post.get('image_base64'))
+            img_obj = base64_to_image(post.get('image_base64'))
+            if img_obj:
                 st.image(img_obj, use_column_width=True)
-            except:
-                pass # Fail silently on image error
         
-        st.markdown(post.get('content'))
+        st.markdown(post.get('content', ''))
         
         # --- COMMENTS ---
         st.markdown("<div class='comment-section'><h6>Comments</h6>", unsafe_allow_html=True)
@@ -307,14 +324,17 @@ def render_feed(category):
         # Fetch Comments for this post
         c_query = db.collection('comments').where('post_id', '==', post_id).where('is_deleted', '==', 0).stream()
         c_list = list(c_query)
-        c_list.sort(key=lambda x: x.to_dict().get('created_at', datetime.min))
+        # Sorting Safe Fix for comments
+        c_list.sort(key=lambda x: x.to_dict().get('created_at').timestamp() if x.to_dict().get('created_at') else 0)
 
         if not c_list:
             st.markdown("<p style='color:#666;font-size:13px;font-style:italic;'>No comments yet.</p>", unsafe_allow_html=True)
         
         for c_doc in c_list:
             c_data = c_doc.to_dict()
-            c_date = c_data.get('created_at').strftime("%Y-%m-%d %H:%M") if c_data.get('created_at') else ""
+            c_time_val = c_data.get('created_at')
+            c_date = c_time_val.strftime("%Y-%m-%d %H:%M") if c_time_val else ""
+            
             st.markdown(f"""
             <div class='comment-box'>
                 <div class='comment-user'>{c_data.get('username')} <span style='font-weight:normal;opacity:0.6;'>• {c_date}</span></div>
@@ -355,7 +375,9 @@ def render_gallery():
         post = doc.to_dict()
         with cols[i % 2]:
             if post.get('image_base64'):
-                st.image(base64_to_image(post.get('image_base64')), use_column_width=True)
+                img_obj = base64_to_image(post.get('image_base64'))
+                if img_obj:
+                    st.image(img_obj, use_column_width=True)
             st.caption(post.get('title'))
             
             if st.session_state.get("role") == "admin":
